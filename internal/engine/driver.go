@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -131,11 +132,33 @@ func (d *Driver) CheckLoginStatus() (bool, error) {
 		return false, err
 	}
 
+	// 1. Fast path: check auth cookies via Storage.getCookies
+	rawCookies, err := d.client.Call("Storage.getCookies", map[string]interface{}{})
+	if err == nil {
+		var cookieResp struct {
+			Cookies []struct {
+				Name string `json:"name"`
+			} `json:"cookies"`
+		}
+		if json.Unmarshal(rawCookies, &cookieResp) == nil {
+			for _, c := range cookieResp.Cookies {
+				if c.Name == "__Secure-1PSID" || c.Name == "SID" || c.Name == "__Secure-3PSID" || c.Name == "__Secure-1PSIDTS" {
+					return true, nil
+				}
+			}
+		}
+	}
+
+	// 2. DOM Check
 	res, err := d.client.Evaluate(`(() => {
-		const editor = document.querySelector('rich-textarea div.ql-editor, [contenteditable="true"]');
+		const u = location.href;
+		const isAccounts = u.includes('accounts.google.com');
+		const editor = document.querySelector('rich-textarea div.ql-editor, rich-textarea, [contenteditable]');
 		const switcher = document.querySelector('button.input-area-switch, bard-mode-switcher button, [data-test-id="bard-mode-menu-button"]');
-		const avatar = document.querySelector('img[alt*="Google Account"], [aria-label*="Google Account"], bard-avatar');
-		return !!(editor || switcher || avatar);
+		const avatar = document.querySelector('img[alt*="Google Account"], [aria-label*="Google Account"], img[alt*="Аккаунт Google"], [aria-label*="Аккаунт Google"], bard-avatar, a[href*="SignOutOptions"]');
+		const hasSignIn = document.querySelector('a[href*="ServiceLogin"], [aria-label*="Войти"], [aria-label*="Sign in"]');
+		const isApp = u.includes('gemini.google.com/app');
+		return !isAccounts && !hasSignIn && (!!avatar || !!editor || !!switcher || isApp);
 	})()`, false)
 	if err != nil {
 		return false, err
