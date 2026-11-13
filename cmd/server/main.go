@@ -33,6 +33,9 @@ func main() {
 		rotateMinutes         int
 		installCommands       bool
 		harvestCookies        bool
+		promptArg             string
+		modelArg              string
+		effortArg             string
 	)
 
 	defaultCookiePath := os.Getenv("COOKIE_STORE_PATH")
@@ -56,6 +59,9 @@ func main() {
 	flag.IntVar(&rotateMinutes, "rotate-interval", 8, "Interval in minutes for background cookie rotation")
 	flag.BoolVar(&installCommands, "install-commands", false, "Install hydrogen.toml and argon.toml slash commands to Antigravity commands directory")
 	flag.BoolVar(&harvestCookies, "harvest-cookies", false, "Connect to Chrome CDP immediately to harvest session cookies and exit")
+	flag.StringVar(&promptArg, "prompt", "", "Direct prompt execution mode (bypass MCP stdio)")
+	flag.StringVar(&modelArg, "model", "hydrogen-4", "Model for direct prompt execution")
+	flag.StringVar(&effortArg, "effort", "middle", "Effort for direct prompt execution")
 	flag.Parse()
 
 	if installCommands {
@@ -78,6 +84,46 @@ func main() {
 			log.Fatalf("Harvest failed: %v", err)
 		}
 		fmt.Printf("Successfully harvested cookies into %s\n", cookieStorePath)
+		os.Exit(0)
+	}
+
+	if promptArg != "" {
+		client := geminiweb.NewClient(session)
+		scotty := media.NewScottyUploader(session)
+		resolver := media.NewImageResolver(workDir)
+		customHexIDs := map[config.ModelType]string{
+			config.ModelHydrogen4: hydrogenHexID,
+			config.ModelArgon4:    argonHexID,
+		}
+		modelCfg, err := config.ResolveModelConfig(modelArg, effortArg, customHexIDs)
+		if err != nil {
+			log.Fatalf("Invalid model/effort: %v", err)
+		}
+		cleanedPrompt, resolvedImages, err := resolver.ResolveFromPromptAndList(promptArg, nil)
+		if err != nil {
+			log.Fatalf("Resolve images error: %v", err)
+		}
+		var attachments []geminiweb.ScottyAttachment
+		if len(resolvedImages) > 0 {
+			ctxUpload, cancelUpload := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancelUpload()
+			attList, err := scotty.UploadImages(ctxUpload, resolvedImages)
+			if err != nil {
+				log.Fatalf("Scotty image upload: %v", err)
+			}
+			attachments = attList
+		}
+		ctxGen, cancelGen := context.WithTimeout(context.Background(), modelCfg.Timeout)
+		defer cancelGen()
+		resp, err := client.Generate(ctxGen, geminiweb.StreamGenerateRequest{
+			ModelConfig: modelCfg,
+			Prompt:      cleanedPrompt,
+			Attachments: attachments,
+		})
+		if err != nil {
+			log.Fatalf("Generate error: %v", err)
+		}
+		fmt.Println(resp.FormattedOutput())
 		os.Exit(0)
 	}
 

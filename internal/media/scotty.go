@@ -82,7 +82,7 @@ func (u *ScottyUploader) UploadSingle(ctx context.Context, img ResolvedImage) (*
 	reqStart.Header.Set("X-Goog-Upload-Header-Content-Length", strconv.Itoa(len(img.Data)))
 	reqStart.Header.Set("X-Goog-Upload-Header-Content-Type", img.MimeType)
 	reqStart.Header.Set("Push-Id", scottyPushID)
-	reqStart.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	reqStart.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
 	if cookieHdr != "" {
 		reqStart.Header.Set("Cookie", cookieHdr)
 	}
@@ -115,7 +115,7 @@ func (u *ScottyUploader) UploadSingle(ctx context.Context, img ResolvedImage) (*
 	reqUpload.Header.Set("X-Goog-Upload-Command", "upload, finalize")
 	reqUpload.Header.Set("X-Goog-Upload-Offset", "0")
 	reqUpload.Header.Set("Content-Type", img.MimeType)
-	reqUpload.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	reqUpload.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
 	if cookieHdr != "" {
 		reqUpload.Header.Set("Cookie", cookieHdr)
 	}

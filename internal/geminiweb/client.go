@@ -64,8 +64,9 @@ func (c *Client) Generate(ctx context.Context, req StreamGenerateRequest) (*Pars
 	defer cancel()
 
 	resp, err := c.doGenerate(callCtx, req, false)
-	if err != nil && (strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "CSRF")) {
-		// Session might be expired, force refresh WizData and retry once
+	if err != nil && (strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "CSRF") || strings.Contains(err.Error(), "302")) {
+		// Session might be expired, auto harvest fresh cookies and retry
+		_ = c.session.AutoHarvest(callCtx)
 		_, refreshErr := c.session.GetWizData(callCtx, true)
 		if refreshErr == nil {
 			return c.doGenerate(callCtx, req, true)
@@ -129,7 +130,7 @@ func (c *Client) doGenerate(ctx context.Context, req StreamGenerateRequest, isRe
 	}
 
 	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
-	httpReq.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	httpReq.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
 	httpReq.Header.Set("Origin", "https://gemini.google.com")
 	reqReferer := "https://gemini.google.com/"
 	if convCtx.ConversationID != "" {

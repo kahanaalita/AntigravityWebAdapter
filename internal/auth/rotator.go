@@ -75,7 +75,7 @@ func (r *CookieRotator) RotateOnce(ctx context.Context) error {
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Cookie", cookieHdr)
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
 	req.Header.Set("Origin", "https://gemini.google.com")
 	req.Header.Set("Referer", "https://gemini.google.com/")
 

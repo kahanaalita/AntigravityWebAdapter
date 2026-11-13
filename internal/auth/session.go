@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -198,10 +199,31 @@ type SessionManager struct {
 // NewSessionManager creates a SessionManager.
 func NewSessionManager(cookiePath, cdpURL string) (*SessionManager, error) {
 	jar := tls_client.NewCookieJar()
+
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 3 * time.Second}
+			return d.DialContext(ctx, "udp", "1.1.1.1:53")
+		},
+	}
+	dialer := net.Dialer{
+		Resolver: resolver,
+		Timeout:  30 * time.Second,
+	}
+
 	options := []tls_client.HttpClientOption{
 		tls_client.WithTimeoutSeconds(120),
-		tls_client.WithClientProfile(profiles.Chrome_131),
+		tls_client.WithClientProfile(profiles.Safari_16_0),
 		tls_client.WithCookieJar(jar),
+		tls_client.WithNotFollowRedirects(),
+		tls_client.WithDialer(dialer),
+	}
+
+	if proxyURL := os.Getenv("HTTPS_PROXY"); proxyURL != "" {
+		options = append(options, tls_client.WithProxyUrl(proxyURL))
+	} else if proxyURL := os.Getenv("HTTP_PROXY"); proxyURL != "" {
+		options = append(options, tls_client.WithProxyUrl(proxyURL))
 	}
 
 	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
@@ -299,7 +321,7 @@ func (s *SessionManager) RefreshWizData(ctx context.Context) (*WizData, error) {
 	if cookieHdr != "" {
 		req.Header.Set("Cookie", cookieHdr)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9,ru;q=0.8")
 	req.Header.Set("Sec-Fetch-Dest", "document")
@@ -326,13 +348,11 @@ func (s *SessionManager) RefreshWizData(ctx context.Context) (*WizData, error) {
 	_ = s.store.Save()
 
 	wiz, err := ParseWizGlobalData(html)
-	if err != nil {
-		// If cookies expired or redirected to accounts.google.com, attempt CDP harvest
-		if s.cdpURL != "" {
-			if cdpErr := s.harvestCookiesFromCDPLocked(ctx); cdpErr == nil {
-				// Retry with freshly harvested cookies
-				return s.refreshWizDataWithNewCookies(ctx)
-			}
+	if err != nil || resp.StatusCode == 302 || resp.StatusCode == 401 {
+		// If cookies expired or redirected to accounts.google.com, attempt AutoHarvest
+		if harvestErr := s.AutoHarvestLocked(ctx); harvestErr == nil {
+			// Retry with freshly harvested cookies
+			return s.refreshWizDataWithNewCookies(ctx)
 		}
 		return nil, fmt.Errorf("parse WIZ_global_data (status %d): %w", resp.StatusCode, err)
 	}
@@ -352,7 +372,7 @@ func (s *SessionManager) refreshWizDataWithNewCookies(ctx context.Context) (*Wiz
 	if cookieHdr != "" {
 		req.Header.Set("Cookie", cookieHdr)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 
 	resp, err := s.httpClient.Do(req)
