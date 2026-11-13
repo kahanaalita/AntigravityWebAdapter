@@ -6,6 +6,8 @@
 
 Engineered in pure Go: **zero external runtime dependencies**, instant cold start in **<10 ms**, memory footprint of only **15–20 MB**, and a single static binary.
 
+> 💡 **Using DeepSeek Harness (DSH)?** Detailed setup instructions for both native MCP and HTTP/SSE modes are available in [DEEPSEEK_HARNESS_SETUP.md](DEEPSEEK_HARNESS_SETUP.md).
+
 ---
 
 ## 🌟 Key Features
