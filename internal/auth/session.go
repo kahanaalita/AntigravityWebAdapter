@@ -222,6 +222,12 @@ func NewSessionManager(cookiePath, cdpURL string) (*SessionManager, error) {
 }
 
 // Store returns the underlying CookieStore.
+func (s *SessionManager) CDPURL() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cdpURL
+}
+
 func (s *SessionManager) Store() *CookieStore {
 	return s.store
 }
@@ -270,10 +276,19 @@ func (s *SessionManager) GetWizData(ctx context.Context, forceRefresh bool) (*Wi
 	return s.RefreshWizData(ctx)
 }
 
-// RefreshWizData queries https://gemini.google.com/app to extract SNlM0e, cfb2h, and FdrFJe.
+// RefreshWizData queries https://gemini.google.com/app or Chrome CDP to extract SNlM0e, cfb2h, and FdrFJe.
 func (s *SessionManager) RefreshWizData(ctx context.Context) (*WizData, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Try Chrome CDP first if available — it holds live authenticated tokens from browser tab
+	if s.cdpURL != "" {
+		if wiz, err := s.FetchWizDataViaCDP(ctx); err == nil && wiz != nil && wiz.At != "" {
+			s.wizData = wiz
+			s.lastWizFetch = time.Now()
+			return wiz, nil
+		}
+	}
 
 	req, err := fhttp.NewRequestWithContext(ctx, "GET", "https://gemini.google.com/app", nil)
 	if err != nil {

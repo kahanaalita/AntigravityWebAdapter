@@ -94,6 +94,24 @@ func (c *Client) doGenerate(ctx context.Context, req StreamGenerateRequest, isRe
 		return nil, fmt.Errorf("build request payload: %w", err)
 	}
 
+	// If Chrome CDP is active, execute directly in browser context (bypasses cookie rotation/fingerprint 401s)
+	if c.session.CDPURL() != "" {
+		respBody, bridgeErr := c.session.BridgeGenerate(ctx, body, wiz.Bl, wiz.Sid)
+		if bridgeErr == nil {
+			parsed, parseErr := ParseStream(strings.NewReader(respBody))
+			if parseErr == nil && parsed != nil {
+				if parsed.ConversationID != "" {
+					c.SaveConversationContext(parsed.ConversationID, ConversationContext{
+						ConversationID: parsed.ConversationID,
+						ResponseID:     parsed.ResponseID,
+						ChoiceID:       parsed.ChoiceID,
+					})
+				}
+				return parsed, nil
+			}
+		}
+	}
+
 	reqID := 100000 + rand.Intn(900000)
 	targetURL := fmt.Sprintf("https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=%s&_reqid=%d&rt=c", wiz.Bl, reqID)
 	if wiz.Sid != "" {
