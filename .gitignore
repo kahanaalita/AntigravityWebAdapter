@@ -1,0 +1,4 @@
+bin/
+runtime/
+*.tmp
+.DS_Store
