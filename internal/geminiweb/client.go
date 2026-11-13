@@ -95,7 +95,7 @@ func (c *Client) doGenerate(ctx context.Context, req StreamGenerateRequest, isRe
 	}
 
 	reqID := 100000 + rand.Intn(900000)
-	targetURL := fmt.Sprintf("https://gemini.google.com/_/BardFrontendService/StreamGenerate?bl=%s&_reqid=%d&rt=c", wiz.Bl, reqID)
+	targetURL := fmt.Sprintf("https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=%s&_reqid=%d&rt=c", wiz.Bl, reqID)
 	if wiz.Sid != "" {
 		targetURL += fmt.Sprintf("&f.sid=%s", wiz.Sid)
 	}

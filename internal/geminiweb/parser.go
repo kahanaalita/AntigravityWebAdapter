@@ -2,11 +2,9 @@ package geminiweb
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"io"
 	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -52,59 +50,40 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 
 	bufReader := bufio.NewReader(reader)
 
-	// Discard leading magic prefix )]}' if present
-	prefix, err := bufReader.Peek(len(magicPrefix))
-	if err == nil && bytes.Equal(prefix, magicPrefix) {
-		_, _ = bufReader.Discard(len(magicPrefix))
-	} else {
-		// Could have \r\n or just )]}'
-		line, _ := bufReader.ReadBytes('\n')
-		if !bytes.Contains(line, []byte(")]}'")) {
-			// Not a prefix line, prepend back
-			bufReader = bufio.NewReader(io.MultiReader(bytes.NewReader(line), bufReader))
+	// Discard leading magic prefix )]}' and any whitespace/newlines
+	for {
+		b, err := bufReader.ReadByte()
+		if err != nil {
+			break
+		}
+		if b == '[' || b == '{' || (b >= '0' && b <= '9') {
+			_ = bufReader.UnreadByte()
+			break
 		}
 	}
 
 	var thoughtBuilder strings.Builder
 	var textBuilder strings.Builder
 
-	// Google stream chunks are either:
-	// Format A: <size>\n<json_payload>\n
-	// Format B: line-delimited JSON payloads
+	dec := json.NewDecoder(bufReader)
 	for {
-		line, err := bufReader.ReadBytes('\n')
-		if err != nil && len(line) == 0 {
+		var token any
+		err := dec.Decode(&token)
+		if err == io.EOF {
 			break
 		}
-
-		trimmed := bytes.TrimSpace(line)
-		if len(trimmed) == 0 {
-			if err != nil {
-				break
-			}
-			continue
-		}
-
-		// Check if line is a chunk size (digits only)
-		if size, parseErr := strconv.Atoi(string(trimmed)); parseErr == nil && size > 0 {
-			chunkBytes := make([]byte, size)
-			n, readErr := io.ReadFull(bufReader, chunkBytes)
-			if n > 0 {
-				resp.RawChunks = append(resp.RawChunks, string(chunkBytes[:n]))
-				extractFromChunk(chunkBytes[:n], resp, &thoughtBuilder, &textBuilder)
-			}
-			if readErr != nil {
-				break
-			}
-			continue
-		}
-
-		// Otherwise, attempt parsing trimmed as a direct JSON line
-		resp.RawChunks = append(resp.RawChunks, string(trimmed))
-		extractFromChunk(trimmed, resp, &thoughtBuilder, &textBuilder)
-
 		if err != nil {
 			break
+		}
+
+		switch v := token.(type) {
+		case float64:
+			// chunk length or numeric meta, ignore
+		case []any:
+			if rawBytes, err := json.Marshal(v); err == nil {
+				resp.RawChunks = append(resp.RawChunks, string(rawBytes))
+			}
+			processEnvelopeToken(v, resp, &thoughtBuilder, &textBuilder)
 		}
 	}
 
@@ -128,20 +107,15 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 	return resp, nil
 }
 
-func extractFromChunk(chunk []byte, resp *ParsedResponse, thoughtB *strings.Builder, textB *strings.Builder) {
-	// Chunk envelope: [["wrb.fr", null, "<inner_json_string>", ...]]
-	var envelope [][]any
-	if err := json.Unmarshal(chunk, &envelope); err != nil {
-		// Not the standard envelope, try generic any
-		var generic []any
-		if err2 := json.Unmarshal(chunk, &generic); err2 == nil {
-			extractGeneric(generic, resp, thoughtB, textB)
+func processEnvelopeToken(envelope []any, resp *ParsedResponse, thoughtB *strings.Builder, textB *strings.Builder) {
+	for _, itemAny := range envelope {
+		item, ok := itemAny.([]any)
+		if !ok || len(item) < 3 {
+			continue
 		}
-		return
-	}
 
-	for _, item := range envelope {
-		if len(item) < 3 {
+		rpcName, _ := item[0].(string)
+		if rpcName != "wrb.fr" {
 			continue
 		}
 

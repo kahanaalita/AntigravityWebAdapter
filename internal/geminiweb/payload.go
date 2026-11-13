@@ -95,10 +95,15 @@ func BuildStreamGenerateBody(prompt string, attachments []ScottyAttachment, conv
 		effortSlot,
 	}
 
-	outerPayload := []any{nil, reqPayload}
-	outerBytes, err := json.Marshal(outerPayload)
+	innerBytes, err := json.Marshal(reqPayload)
 	if err != nil {
 		return "", fmt.Errorf("marshal inner payload: %w", err)
+	}
+
+	outerPayload := []any{nil, string(innerBytes)}
+	outerBytes, err := json.Marshal(outerPayload)
+	if err != nil {
+		return "", fmt.Errorf("marshal outer payload: %w", err)
 	}
 
 	form := url.Values{}
