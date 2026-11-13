@@ -10,10 +10,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/kahanaalita/dsh-gemini-web-adapter-go/internal/engine"
-	"github.com/kahanaalita/dsh-gemini-web-adapter-go/internal/models"
-	"github.com/kahanaalita/dsh-gemini-web-adapter-go/internal/multimodal"
-	"github.com/kahanaalita/dsh-gemini-web-adapter-go/internal/prompt"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/engine"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/models"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/multimodal"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/prompt"
 )
 
 // Server encapsulates the HTTP gateway.

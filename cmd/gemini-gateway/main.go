@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/kahanaalita/dsh-gemini-web-adapter-go/internal/engine"
-	"github.com/kahanaalita/dsh-gemini-web-adapter-go/internal/mcp"
-	"github.com/kahanaalita/dsh-gemini-web-adapter-go/internal/server"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/engine"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/mcp"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/server"
 )
 
 func main() {

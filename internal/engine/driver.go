@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kahanaalita/dsh-gemini-web-adapter-go/internal/cdp"
-	"github.com/kahanaalita/dsh-gemini-web-adapter-go/internal/parser"
-	"github.com/kahanaalita/dsh-gemini-web-adapter-go/internal/prompt"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/cdp"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/parser"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/prompt"
 )
 
 const GeminiAppURL = "https://gemini.google.com/app"

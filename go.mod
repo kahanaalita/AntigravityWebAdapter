@@ -1,3 +1,3 @@
-module github.com/kahanaalita/dsh-gemini-web-adapter-go
+module github.com/kahanaalita/AntigravityWebAdapter
 
 go 1.26.1

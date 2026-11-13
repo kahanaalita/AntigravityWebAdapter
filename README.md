@@ -1,103 +1,198 @@
-# DSH Gemini Web Adapter (Go Edition) 🚀
+# AntigravityWebAdapter (Go Edition) 🚀
 
-Высокопроизводительный автономный шлюз на языке **Go** для интеграции веб-интерфейса Google Gemini (Google AI Pro: **Gemini 4 Hydrogen**, **Gemini 3.5 Flash-Lite**, **Gemini 3.1 Pro**, **Gemini 4 Argon**) с экосистемами **DeepSeek Harness (DSH)** и **Google Antigravity**.
+> **Высокопроизводительный автономный Go-адаптер и MCP-сервер для бесшовной интеграции Google Antigravity с веб-версией Google AI Pro** (модели **Gemini 4 Hydrogen**, **Gemini 4 Argon**, **Gemini 3.1 Pro** и **Gemini 3.5 Flash-Lite**).
 
-Полная замена Node.js-шлюза на чистом Go: **0 внешних зависимостей** (zero external dependencies), потребление оперативной памяти всего **15–20 МБ**, мгновенный запуск за **5 мс** и единый бинарный файл.
+`AntigravityWebAdapter` связывает интерфейс Antigravity с веб-интерфейсом `gemini.google.com/app`, позволяя использовать полную мощь моделей тарифа Google AI Pro без поминутной тарификации внешних облачных API (Vertex AI / Generative Language API).
+
+Реализация выполнена на чистом Go: **0 внешних зависимостей** (zero external dependencies), мгновенный холодный старт за **<10 мс**, потребление оперативной памяти всего **15–20 МБ** и единый статический бинарник.
 
 ---
 
 ## 🌟 Ключевые возможности
 
-- ⚡ **Zero-Dependency Architecture:** Скомпилирован исключительно на стандартной библиотеке Go и встроенной реализации клиента RFC 6455 WebSocket.
-- 🧠 **Thinking & Multimodal:** Полная поддержка мультимодальности (прикрепление скриншотов и файлов через синтетические события ClipboardEvent/DragEvent) и передача рассуждений (`reasoning_content`) в потоковом SSE режиме.
-- 🛠️ **Отказоустойчивый парсер Tool Calls:** 5-уровневая система эвристического восстановления поврежденного JSON от LLM (экранирование путей Windows, удаление комментариев JS, закрытие скобок, устранение висячих запятых).
-- 🔌 **Двойной режим работы (HTTP Gateway + Antigravity MCP):**
-  - **HTTP/SSE Server (`--port 5690`):** Полная совместимость со спецификацией OpenAI Chat Completions API для DeepSeek Harness.
-  - **MCP Stdio Server (`--mcp`):** Нативная интеграция с **Google Antigravity** в качестве Model Context Protocol сервера (`ask_gemini_web`, `gemini_web_status`).
-- 🛡️ **Anti-Canvas & Anti-Sandbox Directives:** Автоматическое подавление внутренних интерфейсов Gemini (Canvas, Workspace extensions) и подтверждение диалогов загрузки файлов.
-- 🌐 **Auto-Proxy Probing:** Автоматическое обнаружение локальных прокси (SOCKS5/HTTP на портах 10808, 7890, 1080, 10809).
+* ⚡ **Zero-Dependency Архитектура:** Скомпилирован исключительно на стандартной библиотеке Go со встроенной реализацией RFC 6455 WebSocket клиента. Никаких внешних рантаймов Node.js, Puppeteer или Playwright.
+* 🔌 **Нативный Model Context Protocol (MCP):** Полноценный stdio JSON-RPC 2.0 сервер для Antigravity (`--mcp`). Предоставляет инструменты `ask_gemini_web`, `gemini_web_status`, а также атомарные вызовы для субагентов.
+* 🌐 **Двойной режим (MCP Server + HTTP Gateway):**
+  * **MCP Stdio Server (`--mcp`):** Прямое подключение к Antigravity через `mcp_config.json`.
+  * **OpenAI-совместимый HTTP/SSE сервер (`--port 5690`):** Локальный REST/SSE шлюз (`/v1/chat/completions`) для любых внешних клиентов и скриптов.
+* 🧠 **Потоковый стриминг рассуждений (Thinking Trace):** Блоки размышлений модели в реальном времени отделяются от финального ответа и оформляются в удобный сворачиваемый блок `<details><summary>Thinking Process</summary>...</details>`.
+* 🖼️ **Мультимодальность (Vision, скриншоты, файлы):** Бесшовное внедрение картинок (Base64, пути к файлам, системный буфер обмена) в Quill-редактор Gemini через синтетические события `ClipboardEvent('paste')` и `DragEvent('drop')`.
+* 🛠️ **Отказоустойчивый парсер Tool Calls:** 5-уровневая система эвристического восстановления JSON от LLM с устойчивостью к 65+ синтаксическим аномалиям (неэкранированные слеши, висячие запятые, псевдонимы аргументов).
+* 🛡️ **Anti-Canvas & Anti-Detect:** Автоматическое подавление всплывающих интерфейсов Canvas, подтверждение согласий на загрузку файлов и запуск Chrome в режиме защиты от бот-детекта (`--disable-blink-features=AutomationControlled`).
+* 🔄 **Zero-Config Auto-Proxy Probing:** Асинхронное сканирование (<15 мс) локальных портов прокси (SOCKS5/HTTP: `10808`, `7890`, `1080`, `10809`). При отсутствии прокси прозрачно используется системный стек сети (VPN, WireGuard).
 
 ---
 
-## 📊 Матрица моделей
+## 📊 Матрица поддерживаемых моделей
 
-| Идентификатор модели DSH | Модель в веб-интерфейсе | Режим рассуждений | Мультимодальность | Назначение |
+| Модель в Antigravity | Семейство веб-модели | Уровень рассуждений | Таймаут | Назначение |
 |---|---|---|---|---|
-| `gemini-4-hydrogen-high` | **4 Hydrogen** | Высокий (High) | Текст + Изображения | Комплексные инженерные задачи |
-| `gemini-4-hydrogen-medium` | **4 Hydrogen** | Средний (Medium) | Текст + Изображения | Оптимальный баланс рассуждений |
-| `gemini-4-hydrogen-low` | **4 Hydrogen** | Низкий (Low) | Текст + Изображения | Быстрые ответы с кратким обоснованием |
-| `gemini-3.5-flash-lite` | **3.5 Flash-Lite** | — | Текст + Изображения | Мгновенные ответы с минимальной задержкой |
-| `gemini-3.1-pro-high` | **3.1 Pro** | Высокий (High) | Текст + Изображения | Исследования и многоуровневый анализ |
-| `gemini-4-argon-high` | **4 Argon** | Высокий (High) | Текст + Изображения | Кодогенерация, аудит и архитектура |
+| **`/a-hydrogen-high`** | **Gemini 4 Hydrogen** | Высокий (`high`) | 600 с | Глубокий логический анализ, архитектура |
+| **`/a-hydrogen-middle`** | **Gemini 4 Hydrogen** | Средний (`middle`) | 300 с | Сбалансированный повседневный режим |
+| **`/a-hydrogen-low`** | **Gemini 4 Hydrogen** | Базовый (`low`) | 120 с | Быстрые ответы и простые инструкции |
+| **`/a-argon-high`** | **Gemini 4 Argon** | Высокий (`high`) | 600 с | Максимальный синтез, ревью кода, аудит |
+| **`/a-argon-medium`** | **Gemini 4 Argon** | Средний (`medium`) | 300 с | Программирование и рефакторинг |
+| **`/a-argon-low`** | **Gemini 4 Argon** | Базовый (`low`) | 120 с | Быстрые подсказки по синтаксису |
+| **`gemini-3.1-pro-high`** | **Gemini 3.1 Pro** | Высокий (`high`) | 600 с | Сложные академические исследования |
+| **`gemini-3.5-flash-lite`** | **3.5 Flash-Lite** | — | 60 с | Мгновенные лаконичные ответы |
 
 ---
 
-## 🚀 Сборка и запуск
+## 🏗 Архитектура системы
 
-### 1. Сборка бинарника
-```bash
-git clone https://github.com/kahanaalita/dsh-gemini-web-adapter-go.git
-cd dsh-gemini-web-adapter-go
-go build -o bin/gemini-gateway ./cmd/gemini-gateway
+```mermaid
+flowchart TD
+    subgraph Antigravity ["Среда Google Antigravity"]
+        Chat["Sidebar Chat / Agent Mode"]
+        SlashCmd["Слэш-команды (/a-argon-*, /a-hydrogen-*)"]
+        MCPClient["MCP Client (JSON-RPC stdio)"]
+    end
+
+    subgraph Adapter ["AntigravityWebAdapter (Go Binary)"]
+        MCPEngine["MCP Stdio Server (internal/mcp)"]
+        HTTPEngine["HTTP Gateway :5690 (internal/server)"]
+        Driver["Browser Driver (internal/engine)"]
+        Parser["ToolCall & Thinking Parser (internal/parser)"]
+        CDP["CDP Client over WebSocket RFC 6455 (internal/cdp)"]
+    end
+
+    subgraph Browser ["Изолированный Chrome"]
+        Tab["Вкладка gemini.google.com/app"]
+        Quill["Quill Editor + File Injector"]
+    end
+
+    subgraph Google ["Инфраструктура Google AI Pro"]
+        Backend["Google AI Pro (Hydrogen 4 / Argon 4)"]
+    end
+
+    Chat --> SlashCmd
+    SlashCmd --> MCPClient
+    MCPClient -->|"stdio (JSON-RPC 2.0)"| MCPEngine
+    MCPEngine --> Driver
+    HTTPEngine --> Driver
+    Driver --> Parser
+    Driver --> CDP
+    CDP -->|"Chrome DevTools Protocol"| Tab
+    Tab --> Quill
+    Quill -->|"HTTPS / uTLS"| Backend
+    Backend -->|"Thinking Trace + Markdown"| Tab
 ```
 
-### 2. Запуск в режиме HTTP Gateway (для DeepSeek Harness)
+---
+
+## 🚀 Установка и сборка
+
+### 1. Требования к окружению
+* **ОС:** macOS (Apple Silicon / Intel), Linux (x86_64, arm64) или Windows.
+* **Go:** версия 1.23 или новее.
+* **Браузер:** Google Chrome (авторизованный в аккаунте Google AI Pro).
+
+### 2. Клонирование и сборка бинарника
 ```bash
-./bin/gemini-gateway --port 5690 --base ~/.dsh-gemini-web-adapter-go
+git clone https://github.com/kahanaalita/AntigravityWebAdapter.git
+cd AntigravityWebAdapter
+go build -o bin/antigravity-web-adapter ./cmd/gemini-gateway
 ```
 
-### 3. Запуск в режиме MCP Server (для Antigravity)
-Добавьте сервер в настройки Antigravity (`~/.gemini/antigravity/mcp.json` или конфигурацию плагина):
+Скомпилированный файл появится в `bin/antigravity-web-adapter`.
+
+---
+
+## ⚙️ Подключение к Antigravity
+
+Откройте файл конфигурации MCP в Antigravity (`~/.gemini/antigravity/mcp_config.json`):
+
 ```json
 {
   "mcpServers": {
-    "gemini-web": {
-      "command": "/Users/kahanaalita/.gemini/antigravity/scratch/dsh-gemini-web-adapter-go/bin/gemini-gateway",
-      "args": ["--mcp"]
+    "antigravity-web-adapter": {
+      "command": "/Users/username/path/to/AntigravityWebAdapter/bin/antigravity-web-adapter",
+      "args": [
+        "--mcp",
+        "--base",
+        "/Users/username/.config/antigravity-web-adapter/runtime"
+      ],
+      "env": {
+        "DEFAULT_HYDROGEN_EFFORT": "middle",
+        "DEFAULT_ARGON_EFFORT": "medium"
+      },
+      "timeoutSeconds": 600
     }
   }
 }
 ```
 
+> [!TIP]
+> При первом запуске адаптер автоматически откроет защищенный сеанс Chrome. Убедитесь, что вы авторизованы на странице `gemini.google.com/app`. Сессия и токены сохраняются в указанной директории `--base`.
+
 ---
 
-## 🏛️ Архитектура
+## 💻 Использование
 
-```mermaid
-flowchart TD
-    subgraph Clients["Клиентские среды"]
-        DSH["DeepSeek Harness (DSH)<br/>OpenAI SSE Protocol"]
-        AGY["Google Antigravity<br/>MCP stdio Protocol"]
-    end
+### Слэш-команды в Antigravity Chat
+После подключения адаптера в меню вызова команд доступны быстрые алиасы:
 
-    subgraph GoGateway["DSH Gemini Web Adapter (Go Binary ~10MB)"]
-        CLI["CLI Entrypoint<br/>cmd/gemini-gateway"]
-        HTTPServer["HTTP / SSE Server<br/>:5690 (/v1/chat/completions)"]
-        MCPServer["MCP Stdio Engine<br/>tools: ask_gemini_web"]
-        Parser["Tolerant Tool Call Parser<br/>5-Level Progressive Recovery"]
-        Router["Model & Effort Router<br/>Hydrogen / Argon / Flash-Lite / Pro"]
-        Driver["Chrome CDP Automation<br/>In-tree RFC 6455 WebSocket"]
-    end
+```text
+/a-argon-high Проанализируй эту системную архитектуру и найди узкие места
+/a-argon-medium @src/server.go Сделай рефакторинг обработчиков
+/a-hydrogen-high @diagram.png Объясни структуру взаимодействия микросервисов
+/a-hydrogen-low Быстро сформулируй 3 тезиса по теме
+```
 
-    subgraph Browser["Google Chrome"]
-        CDP["Chrome DevTools Protocol (:port)"]
-        GeminiDOM["gemini.google.com/app<br/>Quill Editor & Thoughts DOM"]
-    end
+### Вызов через субагентов Antigravity
+Субагенты могут вызывать адаптер напрямую через MCP-инструмент:
+```json
+{
+  "name": "ask_gemini_web",
+  "arguments": {
+    "model": "gemini-4-hydrogen-high",
+    "prompt": "Напиши юнит-тесты для модуля аутентификации",
+    "files": ["/path/to/auth.go"]
+  }
+}
+```
 
-    DSH -->|HTTP POST| HTTPServer
-    AGY -->|JSON-RPC stdio| MCPServer
-    HTTPServer --> Router
-    MCPServer --> Router
-    Router --> Driver
-    Driver --> CDP
-    CDP --> GeminiDOM
-    GeminiDOM --> Driver
-    Driver --> Parser
-    Parser --> HTTPServer
-    Parser --> MCPServer
+### Автономный запуск в режиме HTTP-шлюза
+Адаптер можно запускать отдельно от Antigravity как OpenAI-совместимый локальный сервер для сторонних утилит (cURL, Python, Chatbox):
+```bash
+./bin/antigravity-web-adapter --port 5690 --base ~/.config/antigravity-web-adapter/runtime
+```
+
+Пример вызова через cURL:
+```bash
+curl http://127.0.0.1:5690/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-4-argon-high",
+    "messages": [{"role": "user", "content": "Привет, Gemini!"}],
+    "stream": true
+  }'
+```
+
+---
+
+## 📋 Аргументы командной строки
+
+| Флаг | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `--mcp` | bool | `false` | Запуск в режиме stdio MCP-сервера для Antigravity |
+| `--port` | int | `5690` | Порт HTTP/SSE сервера OpenAI API |
+| `--base` | string | `~/.dsh-gemini-web-adapter-go` | Путь к директории сессий, профиля Chrome и логов |
+| `--chrome` | string | авто | Пользовательский путь к исполняемому файлу Google Chrome |
+| `--headless`| bool | `false` | Запуск браузера в фоновом (headless) режиме |
+| `--proxy` | string | авто | Принудительный прокси (`socks5://127.0.0.1:10808` или `direct`) |
+
+---
+
+## 🧪 Тестирование
+
+Запуск набора юнит-тестов (парсер Tool Calls, WebSocket RFC 6455, маршрутизация сессий):
+```bash
+go test -v -count=1 ./...
 ```
 
 ---
 
 ## 📄 Лицензия
-MIT License © 2026 kahanaalita
+
+Распространяется под лицензией MIT. Подробности в файле [LICENSE](LICENSE).

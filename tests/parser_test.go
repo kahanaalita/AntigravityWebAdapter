@@ -3,7 +3,7 @@ package tests
 import (
 	"testing"
 
-	"github.com/kahanaalita/dsh-gemini-web-adapter-go/internal/parser"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/parser"
 )
 
 func TestParseToolCalls(t *testing.T) {

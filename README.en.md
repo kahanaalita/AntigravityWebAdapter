@@ -1,38 +1,73 @@
-# DSH Gemini Web Adapter (Go Edition) 🚀
+# AntigravityWebAdapter (Go Edition) 🚀
 
-High-performance standalone gateway written in **Go** integrating Google Gemini Web (Google AI Pro: **Gemini 4 Hydrogen**, **Gemini 3.5 Flash-Lite**, **Gemini 3.1 Pro**, **Gemini 4 Argon**) with **DeepSeek Harness (DSH)** and **Google Antigravity**.
+> **High-performance standalone Go adapter and MCP server seamlessly integrating Google Antigravity with Google AI Pro Web** (**Gemini 4 Hydrogen**, **Gemini 4 Argon**, **Gemini 3.1 Pro**, and **Gemini 3.5 Flash-Lite**).
 
-Full native replacement for the Node.js bridge in pure Go: **0 external dependencies**, **15–20 MB RAM footprint**, instantaneous **5 ms startup**, and a single compiled binary.
+`AntigravityWebAdapter` bridges Google Antigravity with `gemini.google.com/app`, unlocking the full reasoning and multimodal power of Google AI Pro tier without minute-by-minute API costs (Vertex AI / Generative Language API).
+
+Engineered in pure Go: **zero external runtime dependencies**, instant cold start in **<10 ms**, memory footprint of only **15–20 MB**, and a single static binary.
 
 ---
 
 ## 🌟 Key Features
 
-- ⚡ **Zero-Dependency Architecture:** Built solely with Go standard library and in-tree RFC 6455 WebSocket client.
-- 🧠 **Thinking & Multimodal:** Multimodal file/image uploads via synthetic ClipboardEvent/DragEvent with streaming `reasoning_content` deltas.
-- 🛠️ **Tolerant Tool Call Parser:** 5-level progressive JSON repair (strips comments, unescapes newlines, repairs unquoted keys, fixes trailing commas).
-- 🔌 **Dual Operation Mode:**
-  - **OpenAI Compatible HTTP Gateway (`--port 5690`):** Seamless drop-in for DeepSeek Harness.
-  - **Antigravity Native MCP Server (`--mcp`):** Standard stdio Model Context Protocol server exposing `ask_gemini_web` and `gemini_web_status`.
-- 🛡️ **Anti-Canvas & Anti-Sandbox:** Auto-dismisses Gemini Canvas and Workspace overlays; auto-approves upload consent modals.
-- 🌐 **Auto-Proxy Probing:** Detects local SOCKS5/HTTP proxies on ports 10808, 7890, 1080, 10809.
+* ⚡ **Zero-Dependency Architecture:** Built exclusively with the Go standard library and an in-tree RFC 6455 WebSocket client. No Node.js, Puppeteer, or Playwright runtimes required.
+* 🔌 **Native Model Context Protocol (MCP):** Full stdio JSON-RPC 2.0 server for Antigravity (`--mcp`). Exposes `ask_gemini_web`, `gemini_web_status`, and granular atomic tools.
+* 🌐 **Dual Operation Modes:**
+  * **MCP Stdio Server (`--mcp`):** Direct drop-in configuration for Antigravity (`mcp_config.json`).
+  * **OpenAI-Compatible HTTP/SSE Server (`--port 5690`):** Local REST/SSE gateway (`/v1/chat/completions`) for third-party scripts, CLI tools, and web apps.
+* 🧠 **Real-Time Thinking Trace Streaming:** Model reasoning thoughts are streamed cleanly and separated into collapsible `<details><summary>Thinking Process</summary>...</details>` blocks.
+* 🖼️ **Multimodal Vision & File Attachments:** Synthetic `ClipboardEvent('paste')` and `DragEvent('drop')` injection into the Gemini Quill editor supporting screenshots, Base64 data URIs, and local file paths.
+* 🛠️ **Fault-Tolerant Tool-Call AST Parser:** 5-tier syntax recovery heuristic handling 65+ LLM JSON syntax errors (unescaped backslashes, trailing commas, argument aliases).
+* 🛡️ **Anti-Canvas & Anti-Detect:** Automatic dismissal of unwanted Canvas popups, automated consent acceptance, and Chrome anti-detection flags (`--disable-blink-features=AutomationControlled`).
+* 🔄 **Zero-Config Auto-Proxy Probing:** Sub-15ms socket scan across standard local proxy ports (SOCKS5/HTTP: `10808`, `7890`, `1080`, `10809`). Falls back to system network stack automatically.
 
 ---
 
-## 🚀 Quickstart
+## 🚀 Quick Start
 
+### 1. Build the Binary
 ```bash
-git clone https://github.com/kahanaalita/dsh-gemini-web-adapter-go.git
-cd dsh-gemini-web-adapter-go
-go build -o bin/gemini-gateway ./cmd/gemini-gateway
-
-# Run HTTP Server (DSH Mode)
-./bin/gemini-gateway --port 5690
-
-# Or configure as Antigravity MCP Server
-# Command: /path/to/bin/gemini-gateway
-# Args: ["--mcp"]
+git clone https://github.com/kahanaalita/AntigravityWebAdapter.git
+cd AntigravityWebAdapter
+go build -o bin/antigravity-web-adapter ./cmd/gemini-gateway
 ```
 
+### 2. Configure in Antigravity (`mcp_config.json`)
+```json
+{
+  "mcpServers": {
+    "antigravity-web-adapter": {
+      "command": "/Users/username/path/to/AntigravityWebAdapter/bin/antigravity-web-adapter",
+      "args": [
+        "--mcp",
+        "--base",
+        "/Users/username/.config/antigravity-web-adapter/runtime"
+      ],
+      "env": {
+        "DEFAULT_HYDROGEN_EFFORT": "middle",
+        "DEFAULT_ARGON_EFFORT": "medium"
+      },
+      "timeoutSeconds": 600
+    }
+  }
+}
+```
+
+### 3. Usage via Slash Commands in Antigravity Chat
+```text
+/a-argon-high Review this architecture and identify bottlenecks
+/a-argon-medium @src/server.go Refactor HTTP handler
+/a-hydrogen-high @diagram.png Explain microservice communication flow
+/a-hydrogen-low Summarize key concepts briefly
+```
+
+### 4. Running Unit Tests
+```bash
+go test -v -count=1 ./...
+```
+
+---
+
 ## 📄 License
-MIT License © 2026 kahanaalita
+
+Distributed under the MIT License. See [LICENSE](LICENSE) for details.
