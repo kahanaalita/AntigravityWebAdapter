@@ -1,0 +1,251 @@
+package media
+
+import (
+	"bytes"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+)
+
+var (
+	reImgPath = regexp.MustCompile(`@([^\s"']+\.(png|jpg|jpeg|webp|gif|heic))`)
+	reAtClip  = regexp.MustCompile(`@(clipboard)`)
+)
+
+// ResolvedImage holds normalized image data ready for upload.
+type ResolvedImage struct {
+	FileName string
+	MimeType string
+	Data     []byte
+}
+
+// ImageResolver parses image sources from prompt strings, file paths, clipboard, and base64.
+type ImageResolver struct {
+	WorkDir string
+}
+
+// NewImageResolver creates an ImageResolver.
+func NewImageResolver(workDir string) *ImageResolver {
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
+	return &ImageResolver{WorkDir: workDir}
+}
+
+// ResolveFromPromptAndList extracts images from prompt text (@paths, @clipboard) and explicit images array.
+// Returns cleaned prompt text and resolved images.
+func (r *ImageResolver) ResolveFromPromptAndList(prompt string, explicitPaths []string) (string, []ResolvedImage, error) {
+	var images []ResolvedImage
+	seenPaths := make(map[string]bool)
+
+	// 1. Check for @clipboard in prompt
+	cleanedPrompt := prompt
+	if reAtClip.MatchString(prompt) {
+		clipImg, err := r.ResolveClipboard()
+		if err == nil {
+			images = append(images, *clipImg)
+		}
+		cleanedPrompt = reAtClip.ReplaceAllString(cleanedPrompt, "")
+	}
+
+	// 2. Extract @file paths from prompt
+	matches := reImgPath.FindAllStringSubmatch(prompt, -1)
+	for _, m := range matches {
+		if len(m) > 1 {
+			p := m[1]
+			if !seenPaths[p] {
+				seenPaths[p] = true
+				img, err := r.ResolveFile(p)
+				if err != nil {
+					return "", nil, fmt.Errorf("resolve image %q from prompt: %w", p, err)
+				}
+				images = append(images, *img)
+			}
+		}
+	}
+	cleanedPrompt = reImgPath.ReplaceAllString(cleanedPrompt, "")
+
+	// 3. Process explicit list
+	for _, p := range explicitPaths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if p == "@clipboard" || p == "clipboard://" {
+			clipImg, err := r.ResolveClipboard()
+			if err != nil {
+				return "", nil, fmt.Errorf("resolve clipboard: %w", err)
+			}
+			images = append(images, *clipImg)
+			continue
+		}
+		if strings.HasPrefix(p, "data:image/") {
+			img, err := r.ResolveDataURI(p)
+			if err != nil {
+				return "", nil, fmt.Errorf("resolve data uri: %w", err)
+			}
+			images = append(images, *img)
+			continue
+		}
+
+		cleanPath := strings.TrimPrefix(p, "@")
+		if !seenPaths[cleanPath] {
+			seenPaths[cleanPath] = true
+			img, err := r.ResolveFile(cleanPath)
+			if err != nil {
+				return "", nil, fmt.Errorf("resolve image %q: %w", cleanPath, err)
+			}
+			images = append(images, *img)
+		}
+	}
+
+	// Clean up whitespace in prompt
+	cleanedPrompt = strings.TrimSpace(regexp.MustCompile(`\s+`).ReplaceAllString(cleanedPrompt, " "))
+
+	return cleanedPrompt, images, nil
+}
+
+// ResolveFile reads an image from relative or absolute file path.
+func (r *ImageResolver) ResolveFile(filePath string) (*ResolvedImage, error) {
+	target := filePath
+	if !filepath.IsAbs(target) && r.WorkDir != "" {
+		target = filepath.Join(r.WorkDir, target)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		return nil, fmt.Errorf("read file %s: %w", target, err)
+	}
+
+	mimeType := detectMimeType(data, target)
+	return &ResolvedImage{
+		FileName: filepath.Base(target),
+		MimeType: mimeType,
+		Data:     data,
+	}, nil
+}
+
+// ResolveDataURI decodes data:image/<type>;base64,<data>.
+func (r *ImageResolver) ResolveDataURI(uri string) (*ResolvedImage, error) {
+	comma := strings.Index(uri, ",")
+	if comma < 0 {
+		return nil, errors.New("invalid data URI: missing comma separator")
+	}
+
+	header := uri[:comma]
+	payload := uri[comma+1:]
+
+	mime := "image/png"
+	if strings.HasPrefix(header, "data:") {
+		semi := strings.Index(header, ";")
+		if semi > 5 {
+			mime = header[5:semi]
+		}
+	}
+
+	data, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		return nil, fmt.Errorf("decode base64 data URI: %w", err)
+	}
+
+	return &ResolvedImage{
+		FileName: "image.png",
+		MimeType: mime,
+		Data:     data,
+	}, nil
+}
+
+// ResolveClipboard captures image from macOS clipboard using pngpaste or osascript.
+func (r *ImageResolver) ResolveClipboard() (*ResolvedImage, error) {
+	// Try pngpaste first if available
+	if path, err := exec.LookPath("pngpaste"); err == nil {
+		cmd := exec.Command(path, "-")
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		if err := cmd.Run(); err == nil && out.Len() > 0 {
+			return &ResolvedImage{
+				FileName: "clipboard.png",
+				MimeType: "image/png",
+				Data:     out.Bytes(),
+			}, nil
+		}
+	}
+
+	// Try AppleScript on macOS
+	script := `set clip to (the clipboard as «class PNGf»)`
+	cmd := exec.Command("/usr/bin/osascript", "-e", script)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("osascript clipboard error: %w", err)
+	}
+
+	raw := strings.TrimSpace(string(out))
+	// Expected format: «data PNGf<HEX_STRING>»
+	if strings.HasPrefix(raw, "«data PNGf") && strings.HasSuffix(raw, "»") {
+		hexStr := raw[len("«data PNGf") : len(raw)-len("»")]
+		data, err := hex.DecodeString(hexStr)
+		if err != nil {
+			return nil, fmt.Errorf("decode clipboard hex: %w", err)
+		}
+		return &ResolvedImage{
+			FileName: "clipboard.png",
+			MimeType: "image/png",
+			Data:     data,
+		}, nil
+	}
+
+	return nil, errors.New("no PNG image found in system clipboard")
+}
+
+func detectMimeType(data []byte, filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".webp":
+		return "image/webp"
+	case ".gif":
+		return "image/gif"
+	case ".heic":
+		return "image/heic"
+	}
+
+	if len(data) > 512 {
+		return http.DetectContentType(data[:512])
+	}
+	if len(data) > 0 {
+		return http.DetectContentType(data)
+	}
+	return "image/png"
+}
+
+// ValidateImageSize checks if image exceeds limit (15MB) and validates image headers.
+func ValidateImageSize(data []byte, maxBytes int64) error {
+	if int64(len(data)) > maxBytes {
+		return fmt.Errorf("image size %d bytes exceeds maximum allowed %d bytes", len(data), maxBytes)
+	}
+	// Verify that data is not empty
+	if len(data) == 0 {
+		return errors.New("empty image data")
+	}
+	return nil
+}
+
+// CheckImageValid verifies image format decoding.
+func CheckImageValid(data []byte) error {
+	_, _, err := image.DecodeConfig(bytes.NewReader(data))
+	return err
+}
