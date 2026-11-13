@@ -102,15 +102,51 @@ func resolveWebSocketDebuggerURL(ctx context.Context, endpoint string) (string, 
 	}
 
 	clean := strings.TrimRight(endpoint, "/")
-	reqURL := clean + "/json/version"
 
-	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	// In newer Chrome versions, Network.getCookies is not supported on the browser target (/json/version).
+	// We need to attach to an active page target (/json/list or /json).
+	targetURL := clean + "/json"
+	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
 	if err != nil {
 		return "", err
 	}
 
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Do(req)
+	if err == nil && resp.StatusCode == http.StatusOK {
+		defer resp.Body.Close()
+		var targets []struct {
+			Type                 string `json:"type"`
+			URL                  string `json:"url"`
+			WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&targets); err == nil {
+			// First look for gemini.google.com page
+			for _, t := range targets {
+				if t.Type == "page" && strings.Contains(t.URL, "gemini.google.com") && t.WebSocketDebuggerURL != "" {
+					return t.WebSocketDebuggerURL, nil
+				}
+			}
+			// Fallback to any page
+			for _, t := range targets {
+				if t.Type == "page" && t.WebSocketDebuggerURL != "" {
+					return t.WebSocketDebuggerURL, nil
+				}
+			}
+		}
+	} else if resp != nil {
+		resp.Body.Close()
+	}
+
+	reqURL := clean + "/json/version"
+
+	req, err = http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	client = &http.Client{Timeout: 3 * time.Second}
+	resp, err = client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request %s: %w", reqURL, err)
 	}
