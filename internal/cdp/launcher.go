@@ -233,7 +233,11 @@ func (c *ChromeInstance) FetchTargets() ([]ChromeTarget, error) {
 // NewTarget creates a new tab at the specified URL and returns its target metadata.
 func (c *ChromeInstance) NewTarget(targetURL string) (*ChromeTarget, error) {
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/json/new?%s", c.Port, targetURL)
-	resp, err := http.Post(endpoint, "application/json", nil)
+	req, err := http.NewRequest(http.MethodPut, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

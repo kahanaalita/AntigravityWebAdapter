@@ -331,7 +331,7 @@ func (d *Driver) InsertText(text string) error {
 		insertScript := fmt.Sprintf(`((text) => {
 			const ed = document.querySelector('rich-textarea div.ql-editor, [contenteditable="true"]');
 			if (!ed) return false;
-			ed.innerHTML = '';
+			while (ed.firstChild) ed.removeChild(ed.firstChild);
 			const p = document.createElement('p');
 			p.textContent = text;
 			ed.appendChild(p);
