@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/engine"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/models"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/multimodal"
 )
 
 // MCPRequest represents standard JSON-RPC 2.0 request used by Model Context Protocol.
@@ -30,17 +33,24 @@ type MCPResponse struct {
 
 // MCPServer serves MCP requests over stdio (stdin/stdout).
 type MCPServer struct {
-	driver *engine.Driver
-	reader *bufio.Reader
-	writer io.Writer
+	driver  *engine.Driver
+	baseDir string
+	reader  *bufio.Reader
+	writer  io.Writer
 }
 
 // NewMCPServer creates a new stdio MCP server.
 func NewMCPServer(driver *engine.Driver, r io.Reader, w io.Writer) *MCPServer {
+	home, err := os.UserHomeDir()
+	baseDir := filepath.Join(os.TempDir(), "gemini-web-adapter")
+	if err == nil {
+		baseDir = filepath.Join(home, ".dsh-gemini-web-adapter-go")
+	}
 	return &MCPServer{
-		driver: driver,
-		reader: bufio.NewReader(r),
-		writer: w,
+		driver:  driver,
+		baseDir: baseDir,
+		reader:  bufio.NewReader(r),
+		writer:  w,
 	}
 }
 
@@ -74,6 +84,13 @@ func (s *MCPServer) Run() error {
 
 func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 	switch req.Method {
+	case "ping":
+		return &MCPResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  map[string]interface{}{},
+		}
+
 	case "initialize":
 		return &MCPResponse{
 			JSONRPC: "2.0",
@@ -259,15 +276,6 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 			}
 		}
 
-		return &MCPResponse{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Error: map[string]interface{}{
-				"code":    -32601,
-				"message": fmt.Sprintf("Method not found: %s", callParams.Name),
-			},
-		}
-
 	default:
 		return &MCPResponse{
 			JSONRPC: "2.0",
@@ -280,7 +288,27 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 	}
 }
 
-func (s *MCPServer) executeAsk(reqID interface{}, promptStr, modelStr, effortStr string, imageFiles []string) *MCPResponse {
+func (s *MCPServer) executeAsk(reqID interface{}, promptStr, modelStr, effortStr string, rawImages []string) *MCPResponse {
+	tmpDir := filepath.Join(s.baseDir, "tmp")
+	imageFiles, tempFiles, err := multimodal.ResolveImageInputs(rawImages, tmpDir)
+	if err != nil {
+		return &MCPResponse{
+			JSONRPC: "2.0",
+			ID:      reqID,
+			Result: map[string]interface{}{
+				"isError": true,
+				"content": []map[string]interface{}{
+					{"type": "text", "text": fmt.Sprintf("Error resolving images: %v", err)},
+				},
+			},
+		}
+	}
+	defer func() {
+		for _, f := range tempFiles {
+			_ = os.Remove(f)
+		}
+	}()
+
 	domModel, eff := models.ResolveModel(modelStr, effortStr)
 	askReq := engine.AskRequest{
 		Question: promptStr,
@@ -289,7 +317,10 @@ func (s *MCPServer) executeAsk(reqID interface{}, promptStr, modelStr, effortStr
 		Files:    imageFiles,
 	}
 
-	resp, err := s.driver.Ask(context.Background(), askReq, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	resp, err := s.driver.Ask(ctx, askReq, nil)
 	if err != nil {
 		return &MCPResponse{
 			JSONRPC: "2.0",

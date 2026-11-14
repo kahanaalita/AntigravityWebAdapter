@@ -7,12 +7,15 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/engine"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/models"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/multimodal"
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/parser"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/prompt"
 )
 
@@ -128,12 +131,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// Extract images
 	tmpDir := filepath.Join(s.baseDir, "tmp")
 	var imageFiles []string
+	var tempFiles []string
 	for _, m := range req.Messages {
 		if parts, ok := m.Content.([]interface{}); ok {
-			imgs := multimodal.ExtractImagesFromParts(parts, tmpDir)
+			imgs, temps := multimodal.ExtractImagesFromPartsWithTemp(parts, tmpDir)
 			imageFiles = append(imageFiles, imgs...)
+			tempFiles = append(tempFiles, temps...)
 		}
 	}
+	defer func() {
+		for _, f := range tempFiles {
+			_ = os.Remove(f)
+		}
+	}()
 
 	// Format prompt context
 	isIncremental := len(req.Messages) > 2 && req.Messages[len(req.Messages)-1].Role == "tool"
@@ -145,11 +155,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	askReq := engine.AskRequest{
-		Question: question,
-		Model:    domModel,
-		Effort:   effort,
-		Files:    imageFiles,
-		Tools:    req.Tools,
+		Question:  question,
+		Model:     domModel,
+		Effort:    effort,
+		Files:     imageFiles,
+		Tools:     req.Tools,
+		IsNewChat: !isIncremental,
 	}
 
 	created := time.Now().Unix()
@@ -161,6 +172,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("X-Accel-Buffering", "no")
 		flusher, ok := w.(http.Flusher)
+
+		toolFilter := newStreamToolFilter(len(req.Tools) > 0)
 
 		// Callback for stream deltas
 		onDelta := func(rDelta, cDelta string) {
@@ -187,24 +200,27 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if cDelta != "" {
-				chunk := map[string]interface{}{
-					"id":      chatCmplID,
-					"object":  "chat.completion.chunk",
-					"created": created,
-					"model":   req.Model,
-					"choices": []map[string]interface{}{
-						{
-							"index": 0,
-							"delta": map[string]interface{}{
-								"content": cDelta,
+				filtered := toolFilter.Feed(cDelta)
+				if filtered != "" {
+					chunk := map[string]interface{}{
+						"id":      chatCmplID,
+						"object":  "chat.completion.chunk",
+						"created": created,
+						"model":   req.Model,
+						"choices": []map[string]interface{}{
+							{
+								"index": 0,
+								"delta": map[string]interface{}{
+									"content": filtered,
+								},
 							},
 						},
-					},
-				}
-				b, _ := json.Marshal(chunk)
-				fmt.Fprintf(w, "data: %s\n\n", string(b))
-				if ok {
-					flusher.Flush()
+					}
+					b, _ := json.Marshal(chunk)
+					fmt.Fprintf(w, "data: %s\n\n", string(b))
+					if ok {
+						flusher.Flush()
+					}
 				}
 			}
 		}
@@ -223,6 +239,29 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				flusher.Flush()
 			}
 			return
+		}
+
+		// Flush any remaining non-tool text
+		if remaining := toolFilter.Flush(); remaining != "" {
+			chunk := map[string]interface{}{
+				"id":      chatCmplID,
+				"object":  "chat.completion.chunk",
+				"created": created,
+				"model":   req.Model,
+				"choices": []map[string]interface{}{
+					{
+						"index": 0,
+						"delta": map[string]interface{}{
+							"content": remaining,
+						},
+					},
+				},
+			}
+			b, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "data: %s\n\n", string(b))
+			if ok {
+				flusher.Flush()
+			}
 		}
 
 		// If tool calls were parsed, stream tool_calls delta chunk
@@ -257,7 +296,31 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			b, _ := json.Marshal(tcChunk)
 			fmt.Fprintf(w, "data: %s\n\n", string(b))
+			if ok {
+				flusher.Flush()
+			}
 		}
+
+		// Send proper final SSE chunk with finish_reason: "tool_calls" or "stop"
+		finishReason := "stop"
+		if len(resp.ToolCalls) > 0 {
+			finishReason = "tool_calls"
+		}
+		finalChunk := map[string]interface{}{
+			"id":      chatCmplID,
+			"object":  "chat.completion.chunk",
+			"created": created,
+			"model":   req.Model,
+			"choices": []map[string]interface{}{
+				{
+					"index":         0,
+					"delta":         map[string]interface{}{},
+					"finish_reason": finishReason,
+				},
+			},
+		}
+		b, _ := json.Marshal(finalChunk)
+		fmt.Fprintf(w, "data: %s\n\n", string(b))
 
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		if ok {
@@ -279,9 +342,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	finishReason := "stop"
+	content := resp.Content
+	if len(resp.ToolCalls) > 0 {
+		finishReason = "tool_calls"
+		content = parser.StripToolCallBlocks(content)
+	}
+
 	message := map[string]interface{}{
 		"role":    "assistant",
-		"content": resp.Content,
+		"content": content,
 	}
 
 	if resp.Reasoning != "" {
@@ -313,16 +383,117 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			{
 				"index":         0,
 				"message":       message,
-				"finish_reason": "stop",
+				"finish_reason": finishReason,
 			},
 		},
 		"usage": map[string]int{
 			"prompt_tokens":     len(question) / 4,
-			"completion_tokens": len(resp.Content) / 4,
-			"total_tokens":      (len(question) + len(resp.Content)) / 4,
+			"completion_tokens": len(content) / 4,
+			"total_tokens":      (len(question) + len(content)) / 4,
 		},
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// streamToolFilter buffers and suppresses raw tool_call blocks from user-facing stream deltas.
+type streamToolFilter struct {
+	enabled     bool
+	inToolBlock bool
+	pending     string
+}
+
+func newStreamToolFilter(enabled bool) *streamToolFilter {
+	return &streamToolFilter{enabled: enabled}
+}
+
+func (f *streamToolFilter) Feed(chunk string) string {
+	if !f.enabled || chunk == "" {
+		return chunk
+	}
+
+	text := f.pending + chunk
+	f.pending = ""
+
+	var output strings.Builder
+	toolMarkers := []string{"```tool_call", "<tool_call"}
+
+	for len(text) > 0 {
+		if !f.inToolBlock {
+			// Check if text ends with a partial prefix of any tool marker
+			hasPartial := false
+			for _, marker := range toolMarkers {
+				for l := len(marker) - 1; l >= 1; l-- {
+					if strings.HasSuffix(text, marker[:l]) {
+						f.pending = marker[:l]
+						text = text[:len(text)-l]
+						hasPartial = true
+						break
+					}
+				}
+				if hasPartial {
+					break
+				}
+			}
+
+			// Look for tool block start
+			idxTool := strings.Index(text, "```tool_call")
+			idxXML := strings.Index(text, "<tool_call")
+
+			startIdx := -1
+			startLen := 0
+			if idxTool != -1 && (idxXML == -1 || idxTool < idxXML) {
+				startIdx = idxTool
+				startLen = len("```tool_call")
+			} else if idxXML != -1 {
+				startIdx = idxXML
+				startLen = len("<tool_call")
+			}
+
+			if startIdx != -1 {
+				output.WriteString(text[:startIdx])
+				text = text[startIdx+startLen:]
+				f.inToolBlock = true
+			} else {
+				output.WriteString(text)
+				text = ""
+			}
+		} else {
+			// Look for tool block end
+			idxCloseTick := strings.Index(text, "```")
+			idxCloseXML := strings.Index(text, "</tool_call>")
+
+			endIdx := -1
+			endLen := 0
+			if idxCloseTick != -1 && (idxCloseXML == -1 || idxCloseTick < idxCloseXML) {
+				endIdx = idxCloseTick
+				endLen = len("```")
+			} else if idxCloseXML != -1 {
+				endIdx = idxCloseXML
+				endLen = len("</tool_call>")
+			}
+
+			if endIdx != -1 {
+				text = text[endIdx+endLen:]
+				f.inToolBlock = false
+			} else {
+				text = ""
+			}
+		}
+	}
+
+	return output.String()
+}
+
+func (f *streamToolFilter) Flush() string {
+	if !f.enabled {
+		return ""
+	}
+	res := ""
+	if !f.inToolBlock {
+		res = f.pending
+	}
+	f.pending = ""
+	return res
 }

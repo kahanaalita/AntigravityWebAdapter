@@ -107,8 +107,12 @@ func DetectLocalProxy() string {
 			conn, err := net.DialTimeout("tcp", addr, 60*time.Millisecond)
 			if err == nil {
 				conn.Close()
+				scheme := "socks5"
+				if p == 10809 {
+					scheme = "http"
+				}
 				select {
-				case resultCh <- fmt.Sprintf("socks5://127.0.0.1:%d", p):
+				case resultCh <- fmt.Sprintf("%s://127.0.0.1:%d", scheme, p):
 				default:
 				}
 			}
@@ -196,7 +200,9 @@ func LaunchChrome(cfg LauncherConfig) (*ChromeInstance, error) {
 	}
 
 	proxyServer := cfg.ProxyServer
-	if proxyServer == "" {
+	if strings.EqualFold(proxyServer, "direct") || strings.EqualFold(proxyServer, "none") {
+		proxyServer = ""
+	} else if proxyServer == "" {
 		proxyServer = DetectLocalProxy()
 	}
 
@@ -224,6 +230,10 @@ func LaunchChrome(cfg LauncherConfig) (*ChromeInstance, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start chrome: %w", err)
 	}
+
+	go func() {
+		_ = cmd.Wait()
+	}()
 
 	// Wait up to 10 seconds for DevToolsActivePort
 	var port int

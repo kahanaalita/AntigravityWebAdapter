@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/cdp"
@@ -53,6 +54,7 @@ type Driver struct {
 	mu            sync.Mutex
 	initMu        sync.Mutex
 	ready         bool
+	generating    atomic.Bool
 	currentModel  string
 	currentEffort string
 }
@@ -62,6 +64,25 @@ func NewDriver(cfg DriverConfig) *Driver {
 	return &Driver{
 		cfg: cfg,
 	}
+}
+
+// IsGenerating returns true if the driver is currently generating a response.
+func (d *Driver) IsGenerating() bool {
+	return d.generating.Load()
+}
+
+// Close closes the CDP client WebSocket/connection cleanly.
+func (d *Driver) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	d.ready = false
+	if d.client != nil {
+		err := d.client.Close()
+		d.client = nil
+		return err
+	}
+	return nil
 }
 
 // EnsureReady launches Chrome and attaches to the Gemini tab if not already connected.
@@ -132,7 +153,17 @@ func (d *Driver) EnsureReady() error {
 	}
 
 	// Wait for SPA DOM and Quill editor readiness
-	_ = d.WaitForPageReady(15 * time.Second)
+	if err := d.WaitForPageReady(15 * time.Second); err != nil {
+		val, uErr := d.client.Evaluate("window.location.href", false)
+		if uErr == nil {
+			if curURL, ok := val.(string); ok {
+				if strings.Contains(curURL, "accounts.google.com") || strings.Contains(curURL, "ServiceLogin") || strings.Contains(curURL, "challenge") {
+					return fmt.Errorf("authentication required: page redirected to Google accounts login")
+				}
+			}
+		}
+		return fmt.Errorf("gemini page not ready: %w", err)
+	}
 
 	return nil
 }
@@ -156,6 +187,61 @@ func (d *Driver) WaitForPageReady(timeout time.Duration) error {
 		time.Sleep(150 * time.Millisecond)
 	}
 	return fmt.Errorf("timeout waiting for Gemini page and editor ready")
+}
+
+// WaitForSelector polls until document.querySelector(selector) returns an element or timeout expires.
+func (d *Driver) WaitForSelector(selector string, timeout time.Duration) error {
+	script := fmt.Sprintf(`(() => {
+		return !!document.querySelector(%q);
+	})()`, selector)
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		val, err := d.client.Evaluate(script, false)
+		if err == nil {
+			if ok, _ := val.(bool); ok {
+				return nil
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for selector %q", selector)
+}
+
+// ResetChatIfNecessary clicks the "New chat" button in Gemini UI if forced or message count is >= 25.
+func (d *Driver) ResetChatIfNecessary(force bool) error {
+	if !force {
+		countVal, err := d.client.Evaluate("document.querySelectorAll('.model-response-text, message-content, [data-test-id*=\"model-response\"]').length", false)
+		if err == nil {
+			if f, ok := countVal.(float64); ok && int(f) < 25 {
+				return nil
+			}
+		}
+	}
+
+	script := `(() => {
+		const newChatBtn = document.querySelector('a[aria-label*="Новый чат"], a[aria-label*="New chat"], [data-test-id="new-chat-button"], button.new-chat-button, button[aria-label*="Новый чат"], button[aria-label*="New chat"], [aria-label*="New chat"], [aria-label*="Новый чат"]');
+		if (newChatBtn) {
+			newChatBtn.click();
+			return true;
+		}
+		return false;
+	})()`
+
+	val, err := d.client.Evaluate(script, false)
+	if err == nil {
+		if clicked, _ := val.(bool); clicked {
+			d.currentModel = ""
+			d.currentEffort = ""
+			return d.WaitForPageReady(10 * time.Second)
+		}
+	}
+
+	// Fallback: navigate directly to GeminiAppURL
+	_ = d.client.Navigate(GeminiAppURL)
+	d.currentModel = ""
+	d.currentEffort = ""
+	return d.WaitForPageReady(10 * time.Second)
 }
 
 // CheckLoginStatus verifies if user is authenticated in Gemini.
@@ -209,75 +295,72 @@ func (d *Driver) SelectModelAndReasoning(targetModel, targetEffort string) error
 
 	// 2. Fast path: check current text on the button in DOM
 	checkScript := fmt.Sprintf(`((targetModel, targetEffort) => {
+		const EFFORT_SYNONYMS = {
+			low: ['низкий', 'быстрый', 'low', 'fast', 'fast and efficient'],
+			medium: ['средний', 'умеренный', 'medium', 'balanced'],
+			high: ['высокий', 'глубокий', 'high', 'deep']
+		};
+
+		const MODEL_ALIASES = {
+			'4 Hydrogen': ['4 hydrogen', 'hydrogen', 'повседневные дела', 'новинка'],
+			'3.5 Flash-Lite': ['3.5 flash-lite', 'flash-lite', 'быстрые ответы'],
+			'3.1 Pro': ['3.1 pro', 'исследования', 'pro'],
+			'4 Argon': ['4 argon', 'argon', 'код и анализ']
+		};
+
 		const modeBtn = document.querySelector('button.input-area-switch, bard-mode-switcher button, [data-test-id="bard-mode-menu-button"]');
 		const curText = modeBtn ? (modeBtn.innerText || '').toLowerCase() : '';
 		const curAria = modeBtn ? (modeBtn.getAttribute('aria-label') || '').toLowerCase() : '';
 		const full = curText + ' ' + curAria;
-		return full.includes(targetModel.toLowerCase());
+
+		const aliases = MODEL_ALIASES[targetModel] || [targetModel.toLowerCase()];
+		const modelMatched = aliases.some(a => full.includes(a));
+		if (!modelMatched) return false;
+
+		if (!targetEffort) return true;
+
+		const synonyms = EFFORT_SYNONYMS[targetEffort] || [targetEffort.toLowerCase()];
+		return synonyms.some(s => full.includes(s));
 	})(%q, %q)`, targetModel, targetEffort)
 
 	if res, err := d.client.Evaluate(checkScript, false); err == nil {
-		if matched, _ := res.(bool); matched && targetEffort == "" {
+		if matched, _ := res.(bool); matched {
 			d.currentModel = targetModel
 			d.currentEffort = targetEffort
 			return nil
 		}
 	}
 
-	script := fmt.Sprintf(`((targetModel, targetEffort) => {
-		const EFFORT_SYNONYMS = {
-			low: ['низкий', 'быстрый', 'low', 'fast', 'fast and efficient'],
-			medium: ['средний', 'умеренный', 'medium', 'balanced'],
-			high: ['высокий', 'глубокий', 'high', 'deep']
-		};
-
-		const MODEL_ALIASES = {
-			'4 Hydrogen': ['4 hydrogen', 'hydrogen', 'повседневные дела', 'новинка'],
-			'3.5 Flash-Lite': ['3.5 flash-lite', 'flash-lite', 'быстрые ответы'],
-			'3.1 Pro': ['3.1 pro', 'исследования', 'pro'],
-			'4 Argon': ['4 argon', 'argon', 'код и анализ']
-		};
-
-		const aliases = MODEL_ALIASES[targetModel] || [targetModel.toLowerCase()];
-		const synonyms = EFFORT_SYNONYMS[targetEffort] || [];
-
-		// Check current status
+	// Open menu
+	openMenuScript := `(() => {
 		const modeBtn = document.querySelector('button.input-area-switch, bard-mode-switcher button, [data-test-id="bard-mode-menu-button"]');
-		const curText = modeBtn ? (modeBtn.innerText || '').toLowerCase() : '';
-		const modelMatches = aliases.some(a => curText.includes(a));
-
-		if (modelMatches && !targetEffort) {
-			return { ok: true, matched: true };
+		if (modeBtn) {
+			modeBtn.click();
+			return true;
 		}
+		return false;
+	})()`
 
-		// Open menu
-		if (modeBtn) modeBtn.click();
-		return { ok: true, opened: true };
-	})(%q, %q)`, targetModel, targetEffort)
-
-	_, err := d.client.Evaluate(script, false)
-	if err != nil {
+	if _, err := d.client.Evaluate(openMenuScript, false); err != nil {
 		return err
 	}
-	time.Sleep(500 * time.Millisecond)
 
-	// Click model if not matched
-	clickScript := fmt.Sprintf(`((targetModel, targetEffort) => {
+	// Wait dynamically for dropdown menu to appear
+	menuSelector := "gem-menu-item, [role=\"menuitem\"], .mat-mdc-menu-item"
+	if err := d.WaitForSelector(menuSelector, 2*time.Second); err != nil {
+		log.Printf("[driver] Warning: dropdown menu did not appear: %v", err)
+	}
+
+	// Step 1: Find and click target model item
+	clickModelScript := fmt.Sprintf(`((targetModel) => {
 		const MODEL_ALIASES = {
 			'4 Hydrogen': ['4 hydrogen', 'hydrogen', 'повседневные дела', 'новинка'],
 			'3.5 Flash-Lite': ['3.5 flash-lite', 'flash-lite', 'быстрые ответы'],
 			'3.1 Pro': ['3.1 pro', 'исследования', 'pro'],
 			'4 Argon': ['4 argon', 'argon', 'код и анализ']
 		};
-		const EFFORT_SYNONYMS = {
-			low: ['низкий', 'быстрый', 'low', 'fast', 'fast and efficient'],
-			medium: ['средний', 'умеренный', 'medium', 'balanced'],
-			high: ['высокий', 'глубокий', 'high', 'deep']
-		};
 
 		const aliases = MODEL_ALIASES[targetModel] || [targetModel.toLowerCase()];
-		const synonyms = EFFORT_SYNONYMS[targetEffort] || [];
-
 		const items = Array.from(document.querySelectorAll('gem-menu-item, [role="menuitem"], .mat-mdc-menu-item'));
 		for (const item of items) {
 			const txt = (item.innerText || '').toLowerCase();
@@ -286,20 +369,48 @@ func (d *Driver) SelectModelAndReasoning(targetModel, targetEffort string) error
 				return true;
 			}
 		}
-		for (const item of items) {
-			const txt = (item.innerText || '').toLowerCase();
-			if (synonyms.some(s => txt.includes(s))) {
-				item.click();
-				return true;
-			}
-		}
 		return false;
-	})(%q, %q)`, targetModel, targetEffort)
+	})(%q)`, targetModel)
 
-	_, _ = d.client.Evaluate(clickScript, false)
-	time.Sleep(400 * time.Millisecond)
+	_, _ = d.client.Evaluate(clickModelScript, false)
 
-	// Press Escape to dismiss overlay
+	// Step 2: If targetEffort != "", find and click effort item
+	if targetEffort != "" {
+		clickEffortScript := fmt.Sprintf(`((targetEffort) => {
+			const EFFORT_SYNONYMS = {
+				low: ['низкий', 'быстрый', 'low', 'fast', 'fast and efficient'],
+				medium: ['средний', 'умеренный', 'medium', 'balanced'],
+				high: ['высокий', 'глубокий', 'high', 'deep']
+			};
+
+			const synonyms = EFFORT_SYNONYMS[targetEffort] || [targetEffort.toLowerCase()];
+			const items = Array.from(document.querySelectorAll('gem-menu-item, [role="menuitem"], [role="radio"], [role="option"], .mat-mdc-menu-item, button'));
+			for (const item of items) {
+				const txt = (item.innerText || '').toLowerCase();
+				const aria = (item.getAttribute('aria-label') || '').toLowerCase();
+				const full = txt + ' ' + aria;
+				if (synonyms.some(s => full.includes(s))) {
+					item.click();
+					return true;
+				}
+			}
+			return false;
+		})(%q)`, targetEffort)
+
+		// Dynamic polling for effort options
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			val, err := d.client.Evaluate(clickEffortScript, false)
+			if err == nil {
+				if ok, _ := val.(bool); ok {
+					break
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+
+	// Dismiss menu cleanly via Escape key
 	_, _ = d.client.Call("Input.dispatchKeyEvent", map[string]interface{}{
 		"type": "rawKeyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27,
 	})
@@ -370,12 +481,14 @@ func (d *Driver) UploadFiles(files []string) error {
 					clipboardData: dt
 				});
 				ed.dispatchEvent(pasteEvt);
-				const dropEvt = new DragEvent('drop', {
-					bubbles: true,
-					cancelable: true,
-					dataTransfer: dt
-				});
-				ed.dispatchEvent(dropEvt);
+				if (!pasteEvt.defaultPrevented) {
+					const dropEvt = new DragEvent('drop', {
+						bubbles: true,
+						cancelable: true,
+						dataTransfer: dt
+					});
+					ed.dispatchEvent(dropEvt);
+				}
 			}
 		})(%q, %q, %q)`, b64, mime, name)
 
@@ -452,10 +565,51 @@ func (d *Driver) SubmitMessage() error {
 	return nil
 }
 
+// ComputeSafeDelta returns the new delta string between prev and curr safely without corrupting UTF-8 runes.
+func ComputeSafeDelta(prev, curr string) string {
+	return computeSafeDelta(prev, curr)
+}
+
+func computeSafeDelta(prev, curr string) string {
+	if curr == prev || len(curr) == 0 {
+		return ""
+	}
+	if strings.HasPrefix(curr, prev) {
+		return curr[len(prev):]
+	}
+
+	// Compare by runes: find longest common prefix
+	prevRunes := []rune(prev)
+	currRunes := []rune(curr)
+
+	commonPrefixLen := 0
+	for commonPrefixLen < len(prevRunes) && commonPrefixLen < len(currRunes) {
+		if prevRunes[commonPrefixLen] != currRunes[commonPrefixLen] {
+			break
+		}
+		commonPrefixLen++
+	}
+
+	if commonPrefixLen >= len(currRunes) {
+		return ""
+	}
+
+	return string(currRunes[commonPrefixLen:])
+}
+
 // Ask sends a prompt, streams response tokens via callback, and returns the finished response.
 func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoningDelta, contentDelta string)) (*AskResponse, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	defer d.generating.Store(false)
+
+	// Ensure context has a default deadline (e.g. 10 minutes) if not already set
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+	}
 
 	if err := d.EnsureReady(); err != nil {
 		return nil, err
@@ -463,6 +617,18 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 
 	// Dismiss any initial overlays
 	d.AutoDismissOverlays()
+
+	// Check if chat reset is necessary (req.IsNewChat or message count >= 25)
+	msgCountVal, _ := d.client.Evaluate("document.querySelectorAll('.model-response-text, message-content, [data-test-id*=\"model-response\"]').length", false)
+	msgCount := 0
+	if f, ok := msgCountVal.(float64); ok {
+		msgCount = int(f)
+	}
+	if req.IsNewChat || msgCount >= 25 {
+		if err := d.ResetChatIfNecessary(true); err != nil {
+			log.Printf("[driver] Warning: failed to reset chat: %v", err)
+		}
+	}
 
 	// Select Model and Reasoning Effort
 	if req.Model != "" {
@@ -488,6 +654,7 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 	}
 
 	// Submit
+	submitTime := time.Now()
 	if err := d.SubmitMessage(); err != nil {
 		return nil, fmt.Errorf("failed to submit prompt: %w", err)
 	}
@@ -508,8 +675,6 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 
 	// Polling loop
 	var fullThoughts, fullContent string
-	lastThoughtsLen := 0
-	lastContentLen := 0
 	stableChecks := 0
 	generationStarted := false
 
@@ -525,8 +690,16 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 		const thoughtsEl = latest.querySelector('model-thoughts, .model-thoughts, [data-test-id*="thoughts"], thinking-overlay');
 		const thoughtsText = thoughtsEl ? (thoughtsEl.innerText || '').trim() : '';
 
-		let contentEl = latest.querySelector('.markdown, message-content, .model-response-text') || latest;
-		const rawContent = (contentEl.innerText || '').trim();
+		let rawContent = '';
+		const markdownEls = Array.from(latest.querySelectorAll('.markdown'));
+		const mainMarkdown = markdownEls.find(el => !el.closest('model-thoughts, .model-thoughts, [data-test-id*="thoughts"], thinking-overlay'));
+		if (mainMarkdown) {
+			rawContent = (mainMarkdown.innerText || '').trim();
+		} else {
+			const clone = latest.cloneNode(true);
+			clone.querySelectorAll('model-thoughts, .model-thoughts, [data-test-id*="thoughts"], thinking-overlay').forEach(e => e.remove());
+			rawContent = (clone.innerText || '').trim();
+		}
 
 		const stopBtn = document.querySelector('button[aria-label*="Остановить"], button[aria-label*="Stop"], button.stop-button');
 		const isGenerating = !!stopBtn;
@@ -544,8 +717,18 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 	for {
 		select {
 		case <-ctx.Done():
+			stopScript := `(() => {
+				const stopBtn = document.querySelector('button[aria-label*="Остановить"], button[aria-label*="Stop"], button.stop-button');
+				if (stopBtn) stopBtn.click();
+			})()`
+			_, _ = d.client.Evaluate(stopScript, false)
 			return nil, ctx.Err()
 		case <-ticker.C:
+			// Check start timeout: if 20 seconds elapsed after submit without generation starting
+			if !generationStarted && time.Since(submitTime) > 20*time.Second {
+				return nil, fmt.Errorf("timeout waiting for Gemini response generation to start")
+			}
+
 			d.AutoDismissOverlays()
 
 			res, err := d.client.Evaluate(extractScript, false)
@@ -563,21 +746,21 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 			isGenerating, _ := m["isGenerating"].(bool)
 
 			if isGenerating || len(content) > 0 || len(thoughts) > 0 {
-				generationStarted = true
+				if !generationStarted {
+					generationStarted = true
+					d.generating.Store(true)
+				}
 			}
 
 			// Stream reasoning delta
-			var rDelta, cDelta string
-			if len(thoughts) > lastThoughtsLen {
-				rDelta = thoughts[lastThoughtsLen:]
-				lastThoughtsLen = len(thoughts)
+			rDelta := computeSafeDelta(fullThoughts, thoughts)
+			if rDelta != "" {
 				fullThoughts = thoughts
 			}
 
 			// Stream content delta
-			if len(content) > lastContentLen {
-				cDelta = content[lastContentLen:]
-				lastContentLen = len(content)
+			cDelta := computeSafeDelta(fullContent, content)
+			if cDelta != "" {
 				fullContent = content
 			}
 
@@ -586,8 +769,8 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 			}
 
 			// Check completion stability: 2 ticks (200ms) is sufficient after generation completes
-			if generationStarted && !isGenerating && (len(content) > 0 || len(thoughts) > 0) {
-				if len(content) == lastContentLen && len(thoughts) == lastThoughtsLen {
+			if generationStarted && !isGenerating && (len(fullContent) > 0 || len(fullThoughts) > 0) {
+				if rDelta == "" && cDelta == "" {
 					stableChecks++
 					if stableChecks >= 2 { // 2 * 100ms = 200ms stable
 						openCalls := strings.Count(fullContent, "```tool_call")

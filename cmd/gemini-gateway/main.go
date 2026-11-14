@@ -49,6 +49,9 @@ func main() {
 	// If MCP mode requested, run stdio loop
 	if *mcpMode {
 		log.SetOutput(os.Stderr)
+		defer func() {
+			_ = driver.Close()
+		}()
 		if err := mcp.RunStdio(driver); err != nil {
 			log.Fatalf("MCP server exited with error: %v", err)
 		}
@@ -57,6 +60,9 @@ func main() {
 
 	// Normal HTTP/SSE Gateway mode
 	srv := server.NewServer(driver, baseDir, *portFlag)
+	defer func() {
+		_ = driver.Close()
+	}()
 
 	// Handle graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -65,6 +71,7 @@ func main() {
 	go func() {
 		<-sigCh
 		fmt.Println("\nShutting down Go Gemini Gateway...")
+		_ = driver.Close()
 		os.Exit(0)
 	}()
 

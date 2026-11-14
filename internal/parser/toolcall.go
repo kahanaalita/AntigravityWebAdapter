@@ -120,8 +120,10 @@ func FixInvalidEscapes(s string) string {
 
 	for i := 0; i < n; i++ {
 		ch := runes[i]
-		if ch == '"' && (i == 0 || runes[i-1] != '\\') {
+		if ch == '"' {
 			inString = !inString
+			buf.WriteRune(ch)
+			continue
 		}
 
 		if inString && ch == '\\' {
@@ -333,7 +335,7 @@ func ParseToolCalls(text string, tools []ToolSchema) []ToolCall {
 	pushObj := func(raw interface{}) bool {
 		m, ok := raw.(map[string]interface{})
 		if !ok || m == nil {
-			return len(calls) > 0
+			return false
 		}
 
 		// Check array wrapper: {"tool_calls": [...]}
@@ -355,7 +357,7 @@ func ParseToolCalls(text string, tools []ToolSchema) []ToolCall {
 		return pushObjFromMap(m, tools, &calls)
 	}
 
-	// Try extracting code blocks first
+	// Try extracting code blocks first in forward order
 	codeBlockPatterns := []*regexp.Regexp{
 		regexp.MustCompile("(?s)```(?:tool_call|json)\\s*\\n([\\s\\S]*?)```"),
 		regexp.MustCompile("(?s)```\\s*\\n([\\s\\S]*?)```"),
@@ -364,36 +366,109 @@ func ParseToolCalls(text string, tools []ToolSchema) []ToolCall {
 
 	for _, re := range codeBlockPatterns {
 		matches := re.FindAllStringSubmatch(t, -1)
-		for i := len(matches) - 1; i >= 0; i-- {
+		for i := 0; i < len(matches); i++ {
 			block := strings.TrimSpace(matches[i][1])
+			matched := false
 			if parsed, _ := JSONParseTolerant(block); parsed != nil {
 				if pushObj(parsed) {
-					return calls
+					matched = true
 				}
 			}
-			// Try balanced objects inside block
-			for _, bo := range ExtractBalancedObjects(block) {
-				if parsed, _ := JSONParseTolerant(bo); parsed != nil {
-					if pushObj(parsed) {
-						return calls
+			// Try balanced objects inside block if the block itself wasn't directly a tool call
+			if !matched {
+				for _, bo := range ExtractBalancedObjects(block) {
+					if parsed, _ := JSONParseTolerant(bo); parsed != nil {
+						if pushObj(parsed) {
+							break
+						}
 					}
 				}
 			}
 		}
+		if len(calls) > 0 {
+			return calls
+		}
 	}
 
-	// Try scanning balanced objects in full text (from end to start)
+	// Try scanning balanced objects in full text (if no code blocks matched)
 	balanced := ExtractBalancedObjects(t)
-	for i := len(balanced) - 1; i >= 0; i-- {
+	searchPos := 0
+	for i := 0; i < len(balanced); i++ {
 		bo := balanced[i]
+		idx := strings.Index(t[searchPos:], bo)
+		if idx == -1 {
+			continue
+		}
+		absStart := searchPos + idx
 		if parsed, _ := JSONParseTolerant(bo); parsed != nil {
 			if pushObj(parsed) {
-				return calls
+				searchPos = absStart + len(bo)
 			}
 		}
 	}
 
 	return calls
+}
+
+// StripToolCallBlocks removes markdown blocks matching ```(?:tool_call|json) and <tool_call>
+// when they represent tool calls, trimming leftover whitespace.
+func StripToolCallBlocks(content string) string {
+	if content == "" {
+		return ""
+	}
+
+	// 1. Remove <tool_call> ... </tool_call> blocks
+	reXML := regexp.MustCompile(`(?s)<tool_call\b[^>]*>[\s\S]*?(?:<\/tool_call>|$)`)
+	res := reXML.ReplaceAllString(content, "")
+
+	// 2. Remove ```tool_call ... ``` blocks
+	reToolCall := regexp.MustCompile("(?s)```tool_call\\s*\\n[\\s\\S]*?(?:```|$)")
+	res = reToolCall.ReplaceAllString(res, "")
+
+	// 3. Remove ```json ... ``` blocks only when they represent tool calls
+	reJSON := regexp.MustCompile("(?s)```json\\s*\\n([\\s\\S]*?)(?:```|$)")
+	res = reJSON.ReplaceAllStringFunc(res, func(match string) string {
+		sub := reJSON.FindStringSubmatch(match)
+		if len(sub) > 1 {
+			inner := strings.TrimSpace(sub[1])
+			if isToolCallJSON(inner) {
+				return ""
+			}
+		}
+		return match
+	})
+
+	// Clean up excess blank lines left after stripping blocks
+	reExtraBlankLines := regexp.MustCompile(`\n{3,}`)
+	res = reExtraBlankLines.ReplaceAllString(res, "\n\n")
+
+	return strings.TrimSpace(res)
+}
+
+func isToolCallJSON(inner string) bool {
+	parsed, _ := JSONParseTolerant(inner)
+	if parsed == nil {
+		return false
+	}
+	m, ok := parsed.(map[string]interface{})
+	if !ok || m == nil {
+		return false
+	}
+	for _, key := range []string{"name", "tool", "function", "tool_calls", "tool_call"} {
+		if _, ok := m[key]; ok {
+			return true
+		}
+	}
+	// Check if any key is a recognized tool parameter alias
+	for k := range m {
+		if _, ok := ParamAlias[k]; ok {
+			return true
+		}
+		if k == "file_path" || k == "command" || k == "content" {
+			return true
+		}
+	}
+	return false
 }
 
 func pushObjFromMap(m interface{}, tools []ToolSchema, calls *[]ToolCall) bool {
