@@ -206,6 +206,34 @@ func (c *Client) EvaluateRaw(expr string, awaitPromise bool) (json.RawMessage, e
 	return c.Call("Runtime.evaluate", params)
 }
 
+// EvaluateRemoteObject runs a JavaScript expression and returns the raw CDP RemoteObject (including objectId).
+func (c *Client) EvaluateRemoteObject(expression string, awaitPromise bool) (map[string]interface{}, error) {
+	params := map[string]interface{}{
+		"expression":    expression,
+		"returnByValue": false,
+		"awaitPromise":  awaitPromise,
+	}
+	res, err := c.Call("Runtime.evaluate", params)
+	if err != nil {
+		return nil, err
+	}
+
+	var evalResult struct {
+		Result           map[string]interface{} `json:"result"`
+		ExceptionDetails interface{}            `json:"exceptionDetails"`
+	}
+
+	if err := json.Unmarshal(res, &evalResult); err != nil {
+		return nil, err
+	}
+
+	if evalResult.ExceptionDetails != nil {
+		return nil, fmt.Errorf("evaluation exception: %v", evalResult.ExceptionDetails)
+	}
+
+	return evalResult.Result, nil
+}
+
 // Navigate tells the page to navigate to the specified URL.
 func (c *Client) Navigate(url string) error {
 	_, err := c.Call("Page.navigate", map[string]interface{}{

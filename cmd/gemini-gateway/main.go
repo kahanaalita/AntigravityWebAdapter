@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/bundler"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/engine"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/mcp"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/server"
@@ -21,7 +22,29 @@ func main() {
 	headlessFlag := flag.Bool("headless", false, "Run Chrome in headless mode")
 	proxyFlag := flag.String("proxy", "", "Proxy server (e.g. socks5://127.0.0.1:10808)")
 	mcpMode := flag.Bool("mcp", false, "Run in MCP stdio mode for Antigravity integration")
+	bundleFlag := flag.String("bundle", "", "Path to project directory to bundle into Markdown")
+	outFlag := flag.String("out", "", "Output markdown file path for bundled project")
 	flag.Parse()
+
+	if *bundleFlag != "" {
+		b := bundler.New(bundler.Config{RootDir: *bundleFlag})
+		dump, stats, err := b.Bundle()
+		if err != nil {
+			log.Fatalf("Bundle failed: %v", err)
+		}
+		if *outFlag != "" {
+			if err := os.MkdirAll(filepath.Dir(*outFlag), 0755); err != nil && filepath.Dir(*outFlag) != "." {
+				log.Fatalf("Failed to create output directory: %v", err)
+			}
+			if err := os.WriteFile(*outFlag, []byte(dump), 0644); err != nil {
+				log.Fatalf("Failed to write bundle output to %s: %v", *outFlag, err)
+			}
+		} else {
+			fmt.Print(dump)
+		}
+		fmt.Fprintf(os.Stderr, "Codebase bundled successfully: %d files, ~%d tokens, %d bytes\n", stats.TotalFiles, stats.EstimatedTokens, stats.TotalBytes)
+		os.Exit(0)
+	}
 
 	baseDir := *baseFlag
 	if baseDir == "" {

@@ -30,19 +30,36 @@ type DriverConfig struct {
 
 // AskRequest specifies parameters for a completion request.
 type AskRequest struct {
-	Question  string
-	Model     string
-	Effort    string
-	Files     []string
-	Tools     []prompt.ToolDefinition
-	IsNewChat bool
+	Question       string
+	Model          string
+	Effort         string
+	Files          []string
+	Tools          []prompt.ToolDefinition
+	IsNewChat      bool
+	ConversationID string
 }
 
 // AskResponse contains completion text, reasoning, and tool calls.
 type AskResponse struct {
-	Content   string            `json:"content"`
-	Reasoning string            `json:"reasoning"`
-	ToolCalls []parser.ToolCall `json:"tool_calls,omitempty"`
+	Content        string            `json:"content"`
+	Reasoning      string            `json:"reasoning"`
+	ConversationID string            `json:"conversation_id,omitempty"`
+	ToolCalls      []parser.ToolCall `json:"tool_calls,omitempty"`
+}
+
+// ChatSession represents an existing Gemini conversation in the sidebar.
+type ChatSession struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
+}
+
+// ScreenshotOptions configures capture parameters.
+type ScreenshotOptions struct {
+	Selector string `json:"selector,omitempty"`
+	FullPage bool   `json:"full_page,omitempty"`
+	Format   string `json:"format,omitempty"` // "png", "jpeg", "webp"
+	Quality  int    `json:"quality,omitempty"`
 }
 
 // Driver orchestrates the Chrome browser and CDP communication.
@@ -442,8 +459,156 @@ func (d *Driver) AutoDismissOverlays() {
 	_, _ = d.client.Evaluate(script, false)
 }
 
-// UploadFiles attaches local files to the Gemini editor via synthetic Clipboard and DragDrop events.
+// UploadFiles attaches images, documents, or codebase dumps to the Gemini prompt.
+// It prioritizes native CDP DOM.setFileInputFiles via Chrome, with fallback to synthetic ClipboardEvent.
 func (d *Driver) UploadFiles(files []string) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	var validPaths []string
+	for _, fp := range files {
+		abs, err := filepath.Abs(fp)
+		if err != nil {
+			abs = fp
+		}
+		if _, err := os.Stat(abs); err == nil {
+			validPaths = append(validPaths, abs)
+		} else {
+			log.Printf("[driver] File not found or unreadable: %s (%v)", fp, err)
+		}
+	}
+	if len(validPaths) == 0 {
+		return nil
+	}
+
+	// Try native CDP file upload first
+	if err := d.uploadFilesCDP(validPaths); err == nil {
+		return nil
+	} else {
+		log.Printf("[driver] Native CDP upload failed (%v), falling back to clipboard paste...", err)
+	}
+
+	return d.uploadFilesFallback(validPaths)
+}
+
+func (d *Driver) uploadFilesCDP(paths []string) error {
+	// Step 1: Ensure input[type=file] elements are mounted in the DOM.
+	// Gemini Web lazy-mounts hidden file inputs when the upload button is clicked.
+	ensureScript := `(() => {
+		const inps = document.querySelectorAll('input[type=file]');
+		if (inps.length > 0) return true;
+		const btn = document.querySelector('button[aria-label*="Загрузка"], button[aria-label*="Upload"], button[aria-label*="Tools"], button[aria-label*="Инструменты"]');
+		if (btn) {
+			btn.click();
+			return true;
+		}
+		return false;
+	})()`
+	_, _ = d.client.Evaluate(ensureScript, false)
+	time.Sleep(300 * time.Millisecond)
+
+	// Step 2: Separate media from documents/code
+	var mediaPaths []string
+	var docPaths []string
+	for _, p := range paths {
+		ext := strings.ToLower(filepath.Ext(p))
+		switch ext {
+		case ".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".webm":
+			mediaPaths = append(mediaPaths, p)
+		default:
+			docPaths = append(docPaths, p)
+		}
+	}
+
+	uploadBatch := func(batch []string, isMedia bool) error {
+		if len(batch) == 0 {
+			return nil
+		}
+
+		selectScript := fmt.Sprintf(`(() => {
+			const inputs = Array.from(document.querySelectorAll('input[type=file]'));
+			if (inputs.length === 0) return null;
+			if (%t) {
+				return inputs.find(i => i.accept.includes('image')) || inputs[0];
+			} else {
+				return inputs.find(i => i.accept.includes('.txt') || !i.accept.includes('image')) || inputs[0];
+			}
+		})()`, isMedia)
+
+		objMap, err := d.client.EvaluateRemoteObject(selectScript, false)
+		if err != nil {
+			return fmt.Errorf("failed to evaluate file input: %w", err)
+		}
+		objectId, ok := objMap["objectId"].(string)
+		if !ok || objectId == "" {
+			return fmt.Errorf("file input objectId missing in CDP response")
+		}
+		defer func() {
+			_, _ = d.client.Call("Runtime.releaseObject", map[string]interface{}{"objectId": objectId})
+		}()
+
+		// Native CDP DOM.setFileInputFiles
+		_, err = d.client.Call("DOM.setFileInputFiles", map[string]interface{}{
+			"files":    batch,
+			"objectId": objectId,
+		})
+		if err != nil {
+			return fmt.Errorf("DOM.setFileInputFiles call failed: %w", err)
+		}
+
+		// Dispatch input and change events to trigger Angular change detection
+		dispatchScript := fmt.Sprintf(`(() => {
+			const inputs = Array.from(document.querySelectorAll('input[type=file]'));
+			const inp = (%t) 
+				? (inputs.find(i => i.accept.includes('image')) || inputs[0])
+				: (inputs.find(i => i.accept.includes('.txt') || !i.accept.includes('image')) || inputs[0]);
+			if (inp) {
+				inp.dispatchEvent(new Event('input', { bubbles: true }));
+				inp.dispatchEvent(new Event('change', { bubbles: true }));
+			}
+			const ed = document.querySelector('rich-textarea div.ql-editor, [contenteditable="true"]');
+			if (ed) ed.focus();
+			return true;
+		})()`, isMedia)
+		_, _ = d.client.Evaluate(dispatchScript, false)
+
+		// Dismiss any open Angular Material menus via Escape
+		_, _ = d.client.Call("Input.dispatchKeyEvent", map[string]interface{}{
+			"type": "rawKeyDown", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27,
+		})
+		_, _ = d.client.Call("Input.dispatchKeyEvent", map[string]interface{}{
+			"type": "keyUp", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27,
+		})
+
+		return nil
+	}
+
+	if err := uploadBatch(mediaPaths, true); err != nil {
+		return err
+	}
+	if err := uploadBatch(docPaths, false); err != nil {
+		return err
+	}
+
+	// Step 3: Wait for all file preview chips to appear
+	for i := 0; i < 20; i++ {
+		time.Sleep(200 * time.Millisecond)
+		checkScript := `(() => {
+			const chips = document.querySelectorAll('uploader-file-preview, .file-preview-chip, gem-attachment');
+			return chips.length;
+		})()`
+		val, _ := d.client.Evaluate(checkScript, false)
+		if count, ok := val.(float64); ok && int(count) >= len(paths) {
+			log.Printf("[driver] Attached %d file(s) via native CDP DOM.setFileInputFiles", len(paths))
+			return nil
+		}
+	}
+
+	return fmt.Errorf("file preview chips failed to appear in DOM within timeout (expected %d)", len(paths))
+}
+
+func (d *Driver) uploadFilesFallback(files []string) error {
 	for _, fp := range files {
 		data, err := os.ReadFile(fp)
 		if err != nil {
@@ -462,6 +627,12 @@ func (d *Driver) UploadFiles(files []string) error {
 			mime = "image/jpeg"
 		case ".webp":
 			mime = "image/webp"
+		case ".md":
+			mime = "text/markdown"
+		case ".txt", ".go", ".py", ".js", ".ts", ".json", ".yaml", ".yml", ".sh", ".sql", ".rs", ".c", ".cpp", ".h":
+			mime = "text/plain"
+		case ".pdf":
+			mime = "application/pdf"
 		}
 
 		script := fmt.Sprintf(`((b64, mime, name) => {
@@ -618,15 +789,22 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 	// Dismiss any initial overlays
 	d.AutoDismissOverlays()
 
-	// Check if chat reset is necessary (req.IsNewChat or message count >= 25)
-	msgCountVal, _ := d.client.Evaluate("document.querySelectorAll('.model-response-text, message-content, [data-test-id*=\"model-response\"]').length", false)
-	msgCount := 0
-	if f, ok := msgCountVal.(float64); ok {
-		msgCount = int(f)
-	}
-	if req.IsNewChat || msgCount >= 25 {
-		if err := d.ResetChatIfNecessary(true); err != nil {
-			log.Printf("[driver] Warning: failed to reset chat: %v", err)
+	// Switch conversation if specific ID requested and not starting new chat
+	if req.ConversationID != "" && !req.IsNewChat {
+		if err := d.switchChatUnlocked(req.ConversationID); err != nil {
+			log.Printf("[driver] Warning: failed to switch chat to %s: %v", req.ConversationID, err)
+		}
+	} else {
+		// Check if chat reset is necessary (req.IsNewChat or message count >= 25)
+		msgCountVal, _ := d.client.Evaluate("document.querySelectorAll('.model-response-text, message-content, [data-test-id*=\"model-response\"]').length", false)
+		msgCount := 0
+		if f, ok := msgCountVal.(float64); ok {
+			msgCount = int(f)
+		}
+		if req.IsNewChat || msgCount >= 25 {
+			if err := d.ResetChatIfNecessary(true); err != nil {
+				log.Printf("[driver] Warning: failed to reset chat: %v", err)
+			}
 		}
 	}
 
@@ -807,8 +985,260 @@ done:
 	}
 
 	return &AskResponse{
-		Content:   fullContent,
-		Reasoning: fullThoughts,
-		ToolCalls: toolCalls,
+		Content:        fullContent,
+		Reasoning:      fullThoughts,
+		ConversationID: d.CurrentConversationID(),
+		ToolCalls:      toolCalls,
 	}, nil
+}
+
+// ParseConversationIDFromPath extracts the conversation ID from a URL pathname.
+func ParseConversationIDFromPath(path string) string {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "app" {
+		return parts[1]
+	}
+	return ""
+}
+
+// CleanConversationID normalizes a conversation ID by stripping URL prefixes or paths.
+func CleanConversationID(chatID string) string {
+	cleanID := strings.TrimSpace(chatID)
+	if strings.Contains(cleanID, "/app/") {
+		parts := strings.Split(cleanID, "/app/")
+		cleanID = parts[len(parts)-1]
+	}
+	return strings.Trim(cleanID, "/")
+}
+
+// ParseChatSessionsFromRaw converts raw JS evaluation data into a slice of ChatSession.
+func ParseChatSessionsFromRaw(val interface{}) []ChatSession {
+	items, ok := val.([]interface{})
+	if !ok {
+		return nil
+	}
+
+	var sessions []ChatSession
+	for _, it := range items {
+		m, ok := it.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := m["id"].(string)
+		title, _ := m["title"].(string)
+		url, _ := m["url"].(string)
+		if id != "" && title != "" {
+			sessions = append(sessions, ChatSession{
+				ID:    id,
+				Title: title,
+				URL:   url,
+			})
+		}
+	}
+
+	return sessions
+}
+
+// ListChats extracts the conversation list directly from the Gemini sidebar DOM without reloading.
+func (d *Driver) ListChats() ([]ChatSession, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.listChatsUnlocked()
+}
+
+func (d *Driver) listChatsUnlocked() ([]ChatSession, error) {
+	if err := d.EnsureReady(); err != nil {
+		return nil, err
+	}
+
+	script := `(() => {
+		const links = Array.from(document.querySelectorAll('a[href*="/app/"]'));
+		const seen = new Set();
+		const list = [];
+		for (const a of links) {
+			const href = a.getAttribute('href') || '';
+			if (!href.startsWith('/app/')) continue;
+			const m = href.match(/\/app\/([a-zA-Z0-9_-]+)/);
+			if (!m) continue;
+			const id = m[1];
+			if (seen.has(id)) continue;
+			seen.add(id);
+			const title = (a.innerText || '').trim();
+			if (!title) continue;
+			list.push({ id, title, url: 'https://gemini.google.com' + href });
+		}
+		return list;
+	})()`
+
+	val, err := d.client.Evaluate(script, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to evaluate ListChats: %w", err)
+	}
+
+	return ParseChatSessionsFromRaw(val), nil
+}
+
+// CurrentConversationID extracts the active conversation ID from window.location.pathname.
+func (d *Driver) CurrentConversationID() string {
+	if d.client == nil {
+		return ""
+	}
+	val, err := d.client.Evaluate("window.location.pathname", false)
+	if err != nil {
+		return ""
+	}
+	path, ok := val.(string)
+	if !ok {
+		return ""
+	}
+	return ParseConversationIDFromPath(path)
+}
+
+// SwitchChat navigates to an existing conversation inside the SPA via link click or history API.
+func (d *Driver) SwitchChat(chatID string) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.switchChatUnlocked(chatID)
+}
+
+func (d *Driver) switchChatUnlocked(chatID string) error {
+	if err := d.EnsureReady(); err != nil {
+		return err
+	}
+
+	cleanID := CleanConversationID(chatID)
+	if cleanID == "" {
+		return fmt.Errorf("chatID cannot be empty")
+	}
+
+	currentID := d.CurrentConversationID()
+	if currentID == cleanID {
+		return nil
+	}
+
+	switchScript := fmt.Sprintf(`((id) => {
+		// 1. Try finding and clicking the link in the sidebar
+		const link = document.querySelector('a[href="/app/' + id + '"], a[href*="/app/' + id + '"]');
+		if (link) {
+			link.click();
+			return { method: "click", ok: true };
+		}
+
+		// 2. Fallback to client-side History pushState
+		try {
+			window.history.pushState({}, '', '/app/' + id);
+			window.dispatchEvent(new PopStateEvent('popstate'));
+			return { method: "pushState", ok: true };
+		} catch (e) {
+			return { method: "failed", ok: false, error: String(e) };
+		}
+	})(%q)`, cleanID)
+
+	val, err := d.client.Evaluate(switchScript, false)
+	if err != nil {
+		return fmt.Errorf("failed to execute SwitchChat script: %w", err)
+	}
+
+	m, _ := val.(map[string]interface{})
+	if m != nil && m["method"] == "failed" {
+		// Fallback to hard navigation if SPA routing failed
+		targetURL := fmt.Sprintf("https://gemini.google.com/app/%s", cleanID)
+		if err := d.client.Navigate(targetURL); err != nil {
+			return fmt.Errorf("failed to navigate to chat %s: %w", cleanID, err)
+		}
+	}
+
+	// Wait up to 2 seconds for SPA route to settle
+	for i := 0; i < 20; i++ {
+		time.Sleep(100 * time.Millisecond)
+		if d.CurrentConversationID() == cleanID {
+			return nil
+		}
+	}
+
+	return nil
+}
+
+// CaptureScreenshot captures a native raster screenshot of the current page or specific element via CDP.
+func (d *Driver) CaptureScreenshot(destPath string, opts ScreenshotOptions) (string, []byte, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if err := d.EnsureReady(); err != nil {
+		return "", nil, err
+	}
+
+	format := opts.Format
+	if format == "" {
+		format = "png"
+	}
+
+	params := map[string]interface{}{
+		"format": format,
+	}
+	if opts.Quality > 0 && format == "jpeg" {
+		params["quality"] = opts.Quality
+	}
+	if opts.FullPage {
+		params["captureBeyondViewport"] = true
+	}
+
+	if opts.Selector != "" {
+		clipScript := fmt.Sprintf(`((sel) => {
+			const el = document.querySelector(sel);
+			if (!el) return null;
+			const r = el.getBoundingClientRect();
+			return { x: r.x, y: r.y, width: r.width, height: r.height, scale: 1 };
+		})(%q)`, opts.Selector)
+
+		val, err := d.client.Evaluate(clipScript, false)
+		if err == nil && val != nil {
+			if m, ok := val.(map[string]interface{}); ok {
+				params["clip"] = m
+			}
+		}
+	}
+
+	res, err := d.client.Call("Page.captureScreenshot", params)
+	if err != nil {
+		return "", nil, fmt.Errorf("Page.captureScreenshot failed: %w", err)
+	}
+
+	var result struct {
+		Data string `json:"data"`
+	}
+	if err := json.Unmarshal(res, &result); err != nil {
+		return "", nil, fmt.Errorf("failed to parse screenshot result: %w", err)
+	}
+
+	b64 := result.Data
+	if b64 == "" {
+		return "", nil, fmt.Errorf("empty screenshot data returned")
+	}
+
+	data, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to decode base64 screenshot: %w", err)
+	}
+
+	if destPath == "" {
+		home := os.Getenv("HOME")
+		if home == "" {
+			home, _ = os.UserHomeDir()
+		}
+		if home == "" {
+			home = "."
+		}
+		baseDir := filepath.Join(home, ".config", "AntigravityWebAdapter", "screenshots")
+		_ = os.MkdirAll(baseDir, 0755)
+		destPath = filepath.Join(baseDir, fmt.Sprintf("screenshot_%d.%s", time.Now().UnixNano(), format))
+	} else {
+		_ = os.MkdirAll(filepath.Dir(destPath), 0755)
+	}
+
+	if err := os.WriteFile(destPath, data, 0644); err != nil {
+		return "", nil, fmt.Errorf("failed to write screenshot to %s: %w", destPath, err)
+	}
+
+	return destPath, data, nil
 }

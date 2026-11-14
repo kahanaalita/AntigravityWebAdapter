@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/bundler"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/engine"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/models"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/multimodal"
@@ -38,6 +39,8 @@ func NewServer(driver *engine.Driver, baseDir string, port int) *Server {
 
 	s.mux.HandleFunc("/v1/models", s.handleModels)
 	s.mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
+	s.mux.HandleFunc("/v1/sessions", s.handleSessions)
+	s.mux.HandleFunc("/v1/screenshot", s.handleScreenshot)
 	s.mux.HandleFunc("/login", s.handleLogin)
 	s.mux.HandleFunc("/login-status", s.handleLoginStatus)
 	s.mux.HandleFunc("/health", s.handleHealth)
@@ -49,6 +52,11 @@ func (s *Server) ListenAndServe() error {
 	addr := fmt.Sprintf("127.0.0.1:%d", s.port)
 	log.Printf("[server] Go Gemini Web Adapter listening on http://%s", addr)
 	return http.ListenAndServe(addr, s.mux)
+}
+
+// ServeHTTP dispatches the request to the internal router.
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mux.ServeHTTP(w, r)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -106,6 +114,9 @@ type ChatCompletionRequest struct {
 	Stream          bool                    `json:"stream"`
 	ReasoningEffort string                  `json:"reasoning_effort,omitempty"`
 	Tools           []prompt.ToolDefinition `json:"tools,omitempty"`
+	Files           []string                `json:"files,omitempty"`
+	ProjectDir      string                  `json:"project_dir,omitempty"`
+	ConversationID  string                  `json:"conversation_id,omitempty"`
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -145,6 +156,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	if len(req.Files) > 0 {
+		imageFiles = append(imageFiles, req.Files...)
+	}
+
 	// Format prompt context
 	isIncremental := len(req.Messages) > 2 && req.Messages[len(req.Messages)-1].Role == "tool"
 	var question string
@@ -154,13 +169,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		question = prompt.BuildFullContext(req.Messages, req.Tools)
 	}
 
+	var tempBundleFile string
+	if req.ProjectDir != "" {
+		b := bundler.New(bundler.Config{RootDir: req.ProjectDir})
+		dump, stats, err := b.Bundle()
+		if err == nil {
+			base := filepath.Base(req.ProjectDir)
+			_ = os.MkdirAll(tmpDir, 0755)
+			tmpFile := filepath.Join(tmpDir, fmt.Sprintf("bundle_%s_%d.txt", base, time.Now().UnixNano()))
+			if err := os.WriteFile(tmpFile, []byte(dump), 0644); err == nil {
+				tempBundleFile = tmpFile
+				imageFiles = append(imageFiles, tmpFile)
+				question = fmt.Sprintf("[Прикреплен проект: %s (%d файлов, ~%d токенов)]\n%s", base, stats.TotalFiles, stats.EstimatedTokens, question)
+			}
+		}
+	}
+	if tempBundleFile != "" {
+		defer os.Remove(tempBundleFile)
+	}
+
 	askReq := engine.AskRequest{
-		Question:  question,
-		Model:     domModel,
-		Effort:    effort,
-		Files:     imageFiles,
-		Tools:     req.Tools,
-		IsNewChat: !isIncremental,
+		Question:       question,
+		Model:          domModel,
+		Effort:         effort,
+		Files:          imageFiles,
+		Tools:          req.Tools,
+		IsNewChat:      !isIncremental,
+		ConversationID: req.ConversationID,
 	}
 
 	created := time.Now().Unix()
@@ -375,10 +410,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	out := map[string]interface{}{
-		"id":      chatCmplID,
-		"object":  "chat.completion",
-		"created": created,
-		"model":   req.Model,
+		"id":              chatCmplID,
+		"object":          "chat.completion",
+		"created":         created,
+		"model":           req.Model,
+		"conversation_id": resp.ConversationID,
 		"choices": []map[string]interface{}{
 			{
 				"index":         0,
@@ -496,4 +532,78 @@ func (f *streamToolFilter) Flush() string {
 	}
 	f.pending = ""
 	return res
+}
+
+func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		sessions, err := s.driver.ListChats()
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to list chats: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if sessions == nil {
+			sessions = []engine.ChatSession{}
+		}
+		curID := s.driver.CurrentConversationID()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"current_conversation_id": curID,
+			"sessions":                sessions,
+		})
+
+	case http.MethodPost:
+		var req struct {
+			ConversationID string `json:"conversation_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ConversationID == "" {
+			http.Error(w, "JSON body with 'conversation_id' is required", http.StatusBadRequest)
+			return
+		}
+		if err := s.driver.SwitchChat(req.ConversationID); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to switch chat: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":                  "ok",
+			"current_conversation_id": req.ConversationID,
+		})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleScreenshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	selector := r.URL.Query().Get("selector")
+	fullPage := r.URL.Query().Get("full_page") == "true"
+	raw := r.URL.Query().Get("raw") == "true"
+
+	savedPath, data, err := s.driver.CaptureScreenshot("", engine.ScreenshotOptions{
+		Selector: selector,
+		FullPage: fullPage,
+	})
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Screenshot failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if raw {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(data)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "ok",
+		"path":   savedPath,
+		"size":   len(data),
+	})
 }

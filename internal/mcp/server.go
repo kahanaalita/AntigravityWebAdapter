@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/kahanaalita/AntigravityWebAdapter/internal/bundler"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/engine"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/models"
 	"github.com/kahanaalita/AntigravityWebAdapter/internal/multimodal"
@@ -126,6 +127,14 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 						"items":       map[string]interface{}{"type": "string"},
 						"description": "Optional list of local image paths or base64 data URIs",
 					},
+					"project_dir": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional path to a local project directory. If specified, automatically bundles the codebase (respecting .gitignore) and attaches it as a file.",
+					},
+					"conversation_id": map[string]interface{}{
+						"type":        "string",
+						"description": "Optional Gemini conversation ID (hex ID from URL /app/<id>) to switch to before asking.",
+					},
 				},
 				"required": []string{"prompt"},
 			}
@@ -163,6 +172,19 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 									},
 									"description": "Optional list of local image file paths to attach via synthetic paste.",
 								},
+								"files": map[string]interface{}{
+									"type":        "array",
+									"items":       map[string]interface{}{"type": "string"},
+									"description": "Optional list of absolute file paths to attach (images, code).",
+								},
+								"project_dir": map[string]interface{}{
+									"type":        "string",
+									"description": "Optional path to a local project directory. If specified, automatically bundles the codebase (respecting .gitignore) and attaches it as a file.",
+								},
+								"conversation_id": map[string]interface{}{
+									"type":        "string",
+									"description": "Optional Gemini conversation ID (hex ID from URL /app/<id>) to switch to before asking.",
+								},
 							},
 							"required": []string{"prompt"},
 						},
@@ -177,13 +199,62 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 								"model":  map[string]interface{}{"type": "string", "description": "Target model: 'hydrogen-4' or 'argon-4'"},
 								"effort": map[string]interface{}{"type": "string", "description": "Effort level: low, medium, high"},
 								"images": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+								"project_dir": map[string]interface{}{
+									"type":        "string",
+									"description": "Optional path to a local project directory. If specified, automatically bundles the codebase (respecting .gitignore) and attaches it as a file.",
+								},
+								"conversation_id": map[string]interface{}{
+									"type":        "string",
+									"description": "Optional Gemini conversation ID (hex ID from URL /app/<id>) to switch to before asking.",
+								},
 							},
 							"required": []string{"prompt"},
 						},
 					},
 					{
+						"name":        "gemini_web_sessions",
+						"description": "List existing conversations from the Gemini sidebar or switch to an existing chat in SPA mode.",
+						"inputSchema": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"action": map[string]interface{}{
+									"type":        "string",
+									"description": "Action to perform: 'list' (read sidebar conversations), 'switch' (navigate to chat), 'current' (get active chat ID).",
+									"enum":        []string{"list", "switch", "current"},
+								},
+								"conversation_id": map[string]interface{}{
+									"type":        "string",
+									"description": "Target conversation ID (required when action='switch').",
+								},
+							},
+							"required": []string{"action"},
+						},
+					},
+					{
+						"name":        "gemini_web_screenshot",
+						"description": "Take a high-speed raster screenshot of the active Gemini browser tab directly via CDP.",
+						"inputSchema": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"output_path": map[string]interface{}{
+									"type":        "string",
+									"description": "Optional path where screenshot PNG should be saved.",
+								},
+								"selector": map[string]interface{}{
+									"type":        "string",
+									"description": "Optional CSS selector to crop a specific element.",
+								},
+								"full_page": map[string]interface{}{
+									"type":        "boolean",
+									"description": "If true, captures the entire scrollable height of the document.",
+									"default":     false,
+								},
+							},
+						},
+					},
+					{
 						"name":        "gemini_web_status",
-						"description": "Check if Gemini Web session is active and user is logged in.",
+						"description": "Check if Gemini Web session is authenticated, retrieve active conversation ID and browser telemetry.",
 						"inputSchema": map[string]interface{}{
 							"type":       "object",
 							"properties": map[string]interface{}{},
@@ -218,13 +289,128 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 		switch callParams.Name {
 		case "gemini_web_status":
 			loggedIn, err := s.driver.CheckLoginStatus()
-			text := fmt.Sprintf("LoggedIn: %v, Error: %v", loggedIn, err)
+			convID := s.driver.CurrentConversationID()
+			statusText := fmt.Sprintf("LoggedIn: %v\nCurrentConversationID: %s\nError: %v", loggedIn, convID, err)
 			return &MCPResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
 				Result: map[string]interface{}{
 					"content": []map[string]interface{}{
-						{"type": "text", "text": text},
+						{"type": "text", "text": statusText},
+					},
+				},
+			}
+
+		case "gemini_web_sessions":
+			action, _ := callParams.Arguments["action"].(string)
+			switch action {
+			case "list":
+				sessions, err := s.driver.ListChats()
+				if err != nil {
+					return &MCPResponse{
+						JSONRPC: "2.0",
+						ID:      req.ID,
+						Error: map[string]interface{}{
+							"code":    -32000,
+							"message": fmt.Sprintf("ListChats failed: %v", err),
+						},
+					}
+				}
+				if sessions == nil {
+					sessions = []engine.ChatSession{}
+				}
+				b, _ := json.MarshalIndent(sessions, "", "  ")
+				return &MCPResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Result: map[string]interface{}{
+						"content": []map[string]interface{}{
+							{"type": "text", "text": string(b)},
+						},
+					},
+				}
+
+			case "current":
+				curID := s.driver.CurrentConversationID()
+				return &MCPResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Result: map[string]interface{}{
+						"content": []map[string]interface{}{
+							{"type": "text", "text": fmt.Sprintf("Current conversation: %s", curID)},
+						},
+					},
+				}
+
+			case "switch":
+				targetID, _ := callParams.Arguments["conversation_id"].(string)
+				if targetID == "" {
+					return &MCPResponse{
+						JSONRPC: "2.0",
+						ID:      req.ID,
+						Error: map[string]interface{}{
+							"code":    -32602,
+							"message": "Missing required argument 'conversation_id'",
+						},
+					}
+				}
+				if err := s.driver.SwitchChat(targetID); err != nil {
+					return &MCPResponse{
+						JSONRPC: "2.0",
+						ID:      req.ID,
+						Error: map[string]interface{}{
+							"code":    -32000,
+							"message": fmt.Sprintf("SwitchChat failed: %v", err),
+						},
+					}
+				}
+				return &MCPResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Result: map[string]interface{}{
+						"content": []map[string]interface{}{
+							{"type": "text", "text": fmt.Sprintf("Switched to conversation %s", targetID)},
+						},
+					},
+				}
+
+			default:
+				return &MCPResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Error: map[string]interface{}{
+						"code":    -32602,
+						"message": fmt.Sprintf("Unknown action '%s'. Use 'list', 'switch', or 'current'", action),
+					},
+				}
+			}
+
+		case "gemini_web_screenshot":
+			outPath, _ := callParams.Arguments["output_path"].(string)
+			selector, _ := callParams.Arguments["selector"].(string)
+			fullPage, _ := callParams.Arguments["full_page"].(bool)
+
+			savedPath, _, err := s.driver.CaptureScreenshot(outPath, engine.ScreenshotOptions{
+				Selector: selector,
+				FullPage: fullPage,
+			})
+			if err != nil {
+				return &MCPResponse{
+					JSONRPC: "2.0",
+					ID:      req.ID,
+					Error: map[string]interface{}{
+						"code":    -32000,
+						"message": fmt.Sprintf("Screenshot capture failed: %v", err),
+					},
+				}
+			}
+
+			return &MCPResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result: map[string]interface{}{
+					"content": []map[string]interface{}{
+						{"type": "text", "text": fmt.Sprintf("Screenshot saved to: %s", savedPath)},
 					},
 				},
 			}
@@ -233,37 +419,53 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 			promptStr, _ := callParams.Arguments["prompt"].(string)
 			modelStr, _ := callParams.Arguments["model"].(string)
 			effortStr, _ := callParams.Arguments["effort"].(string)
-			return s.executeAsk(req.ID, promptStr, modelStr, effortStr, extractImages(callParams.Arguments))
+			projectDir, _ := callParams.Arguments["project_dir"].(string)
+			convID, _ := callParams.Arguments["conversation_id"].(string)
+			return s.executeAsk(req.ID, promptStr, modelStr, effortStr, projectDir, convID, extractImages(callParams.Arguments))
 
 		case "gemini_pro_web_ask":
 			promptStr, _ := callParams.Arguments["prompt"].(string)
 			modelStr, _ := callParams.Arguments["model"].(string)
 			effortStr, _ := callParams.Arguments["effort"].(string)
-			return s.executeAsk(req.ID, promptStr, modelStr, effortStr, extractImages(callParams.Arguments))
+			projectDir, _ := callParams.Arguments["project_dir"].(string)
+			convID, _ := callParams.Arguments["conversation_id"].(string)
+			return s.executeAsk(req.ID, promptStr, modelStr, effortStr, projectDir, convID, extractImages(callParams.Arguments))
 
 		case "argon_high":
 			promptStr, _ := callParams.Arguments["prompt"].(string)
-			return s.executeAsk(req.ID, promptStr, "4 Argon", "high", extractImages(callParams.Arguments))
+			projectDir, _ := callParams.Arguments["project_dir"].(string)
+			convID, _ := callParams.Arguments["conversation_id"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Argon", "high", projectDir, convID, extractImages(callParams.Arguments))
 
 		case "argon_medium":
 			promptStr, _ := callParams.Arguments["prompt"].(string)
-			return s.executeAsk(req.ID, promptStr, "4 Argon", "medium", extractImages(callParams.Arguments))
+			projectDir, _ := callParams.Arguments["project_dir"].(string)
+			convID, _ := callParams.Arguments["conversation_id"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Argon", "medium", projectDir, convID, extractImages(callParams.Arguments))
 
 		case "argon_low":
 			promptStr, _ := callParams.Arguments["prompt"].(string)
-			return s.executeAsk(req.ID, promptStr, "4 Argon", "low", extractImages(callParams.Arguments))
+			projectDir, _ := callParams.Arguments["project_dir"].(string)
+			convID, _ := callParams.Arguments["conversation_id"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Argon", "low", projectDir, convID, extractImages(callParams.Arguments))
 
 		case "hydrogen_high":
 			promptStr, _ := callParams.Arguments["prompt"].(string)
-			return s.executeAsk(req.ID, promptStr, "4 Hydrogen", "high", extractImages(callParams.Arguments))
+			projectDir, _ := callParams.Arguments["project_dir"].(string)
+			convID, _ := callParams.Arguments["conversation_id"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Hydrogen", "high", projectDir, convID, extractImages(callParams.Arguments))
 
 		case "hydrogen_middle", "hydrogen_medium":
 			promptStr, _ := callParams.Arguments["prompt"].(string)
-			return s.executeAsk(req.ID, promptStr, "4 Hydrogen", "medium", extractImages(callParams.Arguments))
+			projectDir, _ := callParams.Arguments["project_dir"].(string)
+			convID, _ := callParams.Arguments["conversation_id"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Hydrogen", "medium", projectDir, convID, extractImages(callParams.Arguments))
 
 		case "hydrogen_low":
 			promptStr, _ := callParams.Arguments["prompt"].(string)
-			return s.executeAsk(req.ID, promptStr, "4 Hydrogen", "low", extractImages(callParams.Arguments))
+			projectDir, _ := callParams.Arguments["project_dir"].(string)
+			convID, _ := callParams.Arguments["conversation_id"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Hydrogen", "low", projectDir, convID, extractImages(callParams.Arguments))
 
 		default:
 			return &MCPResponse{
@@ -288,7 +490,7 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 	}
 }
 
-func (s *MCPServer) executeAsk(reqID interface{}, promptStr, modelStr, effortStr string, rawImages []string) *MCPResponse {
+func (s *MCPServer) executeAsk(reqID interface{}, promptStr, modelStr, effortStr, projectDir, conversationID string, rawImages []string) *MCPResponse {
 	tmpDir := filepath.Join(s.baseDir, "tmp")
 	imageFiles, tempFiles, err := multimodal.ResolveImageInputs(rawImages, tmpDir)
 	if err != nil {
@@ -309,12 +511,32 @@ func (s *MCPServer) executeAsk(reqID interface{}, promptStr, modelStr, effortStr
 		}
 	}()
 
+	var tempBundleFile string
+	if projectDir != "" {
+		b := bundler.New(bundler.Config{RootDir: projectDir})
+		dump, stats, err := b.Bundle()
+		if err == nil {
+			base := filepath.Base(projectDir)
+			_ = os.MkdirAll(tmpDir, 0755)
+			tmpFile := filepath.Join(tmpDir, fmt.Sprintf("bundle_%s_%d.txt", base, time.Now().UnixNano()))
+			if err := os.WriteFile(tmpFile, []byte(dump), 0644); err == nil {
+				tempBundleFile = tmpFile
+				imageFiles = append(imageFiles, tmpFile)
+				promptStr = fmt.Sprintf("[Прикреплен проект: %s (%d файлов, ~%d токенов)]\n%s", base, stats.TotalFiles, stats.EstimatedTokens, promptStr)
+			}
+		}
+	}
+	if tempBundleFile != "" {
+		defer os.Remove(tempBundleFile)
+	}
+
 	domModel, eff := models.ResolveModel(modelStr, effortStr)
 	askReq := engine.AskRequest{
-		Question: promptStr,
-		Model:    domModel,
-		Effort:   eff,
-		Files:    imageFiles,
+		Question:       promptStr,
+		Model:          domModel,
+		Effort:         eff,
+		Files:          imageFiles,
+		ConversationID: conversationID,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -337,6 +559,10 @@ func (s *MCPServer) executeAsk(reqID interface{}, promptStr, modelStr, effortStr
 	outText := resp.Content
 	if resp.Reasoning != "" {
 		outText = fmt.Sprintf("<details>\n<summary>Thinking Process</summary>\n\n%s\n\n</details>\n\n%s", resp.Reasoning, outText)
+	}
+
+	if resp.ConversationID != "" {
+		outText += fmt.Sprintf("\n\n<!-- conversation_id: %s -->", resp.ConversationID)
 	}
 
 	return &MCPResponse{
@@ -365,6 +591,9 @@ func extractImages(args map[string]interface{}) []string {
 		parseList(raw)
 	}
 	if raw, ok := args["images"]; ok && raw != nil {
+		parseList(raw)
+	}
+	if raw, ok := args["files"]; ok && raw != nil {
 		parseList(raw)
 	}
 	return imageFiles
