@@ -13,10 +13,14 @@ Engineered in pure Go: **zero external runtime dependencies**, instant cold star
 ## 🌟 Key Features
 
 * ⚡ **Zero-Dependency Architecture:** Built exclusively with the Go standard library and an in-tree RFC 6455 WebSocket client. No Node.js, Puppeteer, or Playwright runtimes required.
-* 🔌 **Native Model Context Protocol (MCP):** Full stdio JSON-RPC 2.0 server for Antigravity (`--mcp`). Exposes `ask_gemini_web`, `gemini_web_status`, and granular atomic tools.
+* 📦 **Native Codebase Bundler (`internal/bundler`):** Pack entire directory trees into compact context bundles with `.gitignore` support, binary filtering, and token counting (`-bundle` flag, `project_dir` parameter).
+* 📎 **CDP File Upload (`DOM.setFileInputFiles`):** Native CDP file upload directly to the file input with automated clipboard fallback.
+* 🗂️ **Session Management & SPA Navigation:** Instant listing and seamless switching between existing chat sessions without page reloads via HTTP (`/v1/sessions`) and MCP (`gemini_web_sessions`).
+* 📸 **CDP Screenshot Capture (`Page.captureScreenshot`):** High-precision page or DOM-element screenshots via HTTP (`GET /v1/screenshot`) and MCP (`gemini_web_screenshot`).
+* 🔌 **Extended Model Context Protocol (MCP):** Full stdio JSON-RPC 2.0 server for Antigravity (`--mcp`). Exposes `ask_gemini_web`, `gemini_web_sessions`, `gemini_web_screenshot`, `gemini_web_status`, and granular atomic tools.
 * 🌐 **Dual Operation Modes:**
   * **MCP Stdio Server (`--mcp`):** Direct drop-in configuration for Antigravity (`mcp_config.json`).
-  * **OpenAI-Compatible HTTP/SSE Server (`--port 5690`):** Local REST/SSE gateway (`/v1/chat/completions`) for third-party scripts, CLI tools, and web apps.
+  * **OpenAI-Compatible HTTP/SSE Server (`--port 5690`):** Local REST/SSE gateway (`/v1/chat/completions`, `/v1/sessions`, `/v1/screenshot`) for third-party scripts, CLI tools, and web apps.
 * 🧠 **Real-Time Thinking Trace Streaming:** Model reasoning thoughts are streamed cleanly and separated into collapsible `<details><summary>Thinking Process</summary>...</details>` blocks.
 * 🖼️ **Multimodal Vision & File Attachments:** Synthetic `ClipboardEvent('paste')` and `DragEvent('drop')` injection into the Gemini Quill editor supporting screenshots, Base64 data URIs, and local file paths.
 * 🛠️ **Fault-Tolerant Tool-Call AST Parser:** 5-tier syntax recovery heuristic handling 65+ LLM JSON syntax errors (unescaped backslashes, trailing commas, argument aliases).

@@ -13,10 +13,14 @@
 ##  Ключевые возможности
 
 *  **Zero-Dependency Архитектура:** Скомпилирован исключительно на стандартной библиотеке Go со встроенной реализацией RFC 6455 WebSocket клиента. Никаких внешних рантаймов Node.js, Puppeteer или Playwright.
-*  **Нативный Model Context Protocol (MCP):** Полноценный stdio JSON-RPC 2.0 сервер для Antigravity (`--mcp`). Предоставляет инструменты `ask_gemini_web`, `gemini_web_status`, а также атомарные вызовы для субагентов.
+*  **Нативный Codebase Bundler (`internal/bundler`):** Автоматическая упаковка директории проекта в единый контекстный бандл с учётом `.gitignore`, фильтрацией бинарных файлов и подсчётом токенов. Доступен через CLI (`-bundle`), HTTP-параметр `project_dir` и MCP.
+*  **Прямая загрузка файлов через CDP (`DOM.setFileInputFiles`):** Нативное прикрепление файлов к сообщению в веб-интерфейсе Gemini через протокол CDP с автоматическим fallback на системный буфер обмена (`ClipboardEvent`).
+*  **Управление сессиями и SPA-навигация:** Мгновенный листинг и бесшовное переключение между существующими чатами Gemini без перезагрузки вкладки (через SPA History API). Доступно через HTTP (`/v1/sessions`) и MCP (`gemini_web_sessions`).
+*  **Снятие скриншотов через CDP (`Page.captureScreenshot`):** Высокоточный захват страницы или отдельных DOM-элементов через HTTP (`GET /v1/screenshot`) и MCP (`gemini_web_screenshot`).
+*  **Расширенный Model Context Protocol (MCP):** Полноценный stdio JSON-RPC 2.0 сервер для Antigravity (`--mcp`). Предоставляет инструменты `ask_gemini_web`, `gemini_web_sessions`, `gemini_web_screenshot`, `gemini_web_status`, а также атомарные вызовы для субагентов.
 *  **Двойной режим (MCP Server + HTTP Gateway):**
   * **MCP Stdio Server (`--mcp`):** Прямое подключение к Antigravity через `mcp_config.json`.
-  * **OpenAI-совместимый HTTP/SSE сервер (`--port 5690`):** Локальный REST/SSE шлюз (`/v1/chat/completions`) для любых внешних клиентов и скриптов.
+  * **OpenAI-совместимый HTTP/SSE сервер (`--port 5690`):** Локальный REST/SSE шлюз (`/v1/chat/completions`, `/v1/sessions`, `/v1/screenshot`) для любых внешних клиентов и скриптов.
 *  **Потоковый стриминг рассуждений (Thinking Trace):** Блоки размышлений модели в реальном времени отделяются от финального ответа и оформляются в удобный сворачиваемый блок `<details><summary>Thinking Process</summary>...</details>`.
 *  **Мультимодальность (Vision, скриншоты, файлы):** Бесшовное внедрение картинок (Base64, пути к файлам, системный буфер обмена) в Quill-редактор Gemini через синтетические события `ClipboardEvent('paste')` и `DragEvent('drop')`.
 *  **Отказоустойчивый парсер Tool Calls:** 5-уровневая система эвристического восстановления JSON от LLM с устойчивостью к 65+ синтаксическим аномалиям (неэкранированные слеши, висячие запятые, псевдонимы аргументов).
@@ -146,17 +150,28 @@ go build -o bin/antigravity-web-adapter ./cmd/gemini-gateway
 ```
 
 ### Вызов через субагентов Antigravity
-Субагенты могут вызывать адаптер напрямую через MCP-инструмент:
+Субагенты могут вызывать адаптер напрямую через MCP-инструменты:
 ```json
 {
   "name": "ask_gemini_web",
   "arguments": {
     "model": "gemini-4-hydrogen-high",
     "prompt": "Напиши юнит-тесты для модуля аутентификации",
-    "files": ["/path/to/auth.go"]
+    "files": ["/path/to/auth.go"],
+    "project_dir": "/path/to/project",
+    "conversation_id": "c_abc123"
   }
 }
 ```
+
+#### Дополнительные MCP-инструменты:
+* **`gemini_web_sessions`** — управление диалогами в веб-интерфейсе:
+  * `{"action": "list"}` — возвращает список всех существующих чатов и ID активного.
+  * `{"action": "switch", "conversation_id": "<id>"}` — переключается на указанный чат.
+  * `{"action": "current"}` — возвращает ID текущего открытого чата.
+* **`gemini_web_screenshot`** — снятие скриншота вкладки Gemini:
+  * `{"selector": ".chat-container", "full_page": false, "output_path": "shot.png"}`.
+* **`gemini_web_status`** — диагностика состояния адаптера, авторизации и активной сессии.
 
 ### Автономный запуск в режиме HTTP-шлюза
 Адаптер можно запускать отдельно от Antigravity как OpenAI-совместимый локальный сервер для сторонних утилит (cURL, Python, Chatbox):
@@ -164,15 +179,35 @@ go build -o bin/antigravity-web-adapter ./cmd/gemini-gateway
 ./bin/antigravity-web-adapter --port 5690 --base ~/.config/antigravity-web-adapter/runtime
 ```
 
-Пример вызова через cURL:
+Пример вызова генерации через cURL:
 ```bash
 curl http://127.0.0.1:5690/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gemini-4-argon-high",
     "messages": [{"role": "user", "content": "Привет, Gemini!"}],
+    "project_dir": "/Users/user/myproject",
     "stream": true
   }'
+```
+
+#### Эндпоинты управления сессиями и скриншотами:
+* **`GET /v1/sessions`** — получение списка чатов и ID активного:
+  ```json
+  {"current_conversation_id": "c_123", "sessions": [{"id": "c_123", "title": "Рефакторинг"}]}
+  ```
+* **`POST /v1/sessions`** — переключение на существующий чат:
+  ```json
+  {"conversation_id": "c_123"}
+  ```
+* **`GET /v1/screenshot`** — снимок текущего экрана:
+  * `GET /v1/screenshot?full_page=true` — сохраняет скриншот и возвращает JSON `{ "status": "ok", "path": "..." }`.
+  * `GET /v1/screenshot?raw=true` — возвращает чистый бинарный `image/png`.
+
+### Автономная сборка бандла проекта через CLI
+Упаковка проекта в текстовый файл контекста с поддержкой `.gitignore` и фильтрацией бинарных файлов:
+```bash
+./bin/antigravity-web-adapter -bundle /path/to/project -out project_bundle.txt
 ```
 
 ---
@@ -187,6 +222,8 @@ curl http://127.0.0.1:5690/v1/chat/completions \
 | `--chrome` | string | авто | Пользовательский путь к исполняемому файлу Google Chrome |
 | `--headless`| bool | `false` | Запуск браузера в фоновом (headless) режиме |
 | `--proxy` | string | авто | Принудительный прокси (`socks5://127.0.0.1:10808` или `direct`) |
+| `-bundle` | string | `""` | Путь к директории проекта для сборки в бандл контекста и выхода |
+| `-out` | string | `"bundle.txt"` | Имя файла для сохранения бандла (при использовании `-bundle`) |
 
 ---
 
