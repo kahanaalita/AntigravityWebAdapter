@@ -96,6 +96,24 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 		return nil
 
 	case "tools/list":
+		atomicSchema := func(desc string) map[string]interface{} {
+			return map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"prompt": map[string]interface{}{
+						"type":        "string",
+						"description": desc,
+					},
+					"images": map[string]interface{}{
+						"type":        "array",
+						"items":       map[string]interface{}{"type": "string"},
+						"description": "Optional list of local image paths or base64 data URIs",
+					},
+				},
+				"required": []string{"prompt"},
+			}
+		}
+
 		return &MCPResponse{
 			JSONRPC: "2.0",
 			ID:      req.ID,
@@ -133,6 +151,20 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 						},
 					},
 					{
+						"name":        "gemini_pro_web_ask",
+						"description": "Unified invocation of Google AI Pro web models (Hydrogen 4 and Argon 4) with granular reasoning effort.",
+						"inputSchema": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"prompt": map[string]interface{}{"type": "string", "description": "Prompt text"},
+								"model":  map[string]interface{}{"type": "string", "description": "Target model: 'hydrogen-4' or 'argon-4'"},
+								"effort": map[string]interface{}{"type": "string", "description": "Effort level: low, medium, high"},
+								"images": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							},
+							"required": []string{"prompt"},
+						},
+					},
+					{
 						"name":        "gemini_web_status",
 						"description": "Check if Gemini Web session is active and user is logged in.",
 						"inputSchema": map[string]interface{}{
@@ -140,6 +172,12 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 							"properties": map[string]interface{}{},
 						},
 					},
+					{"name": "argon_high", "description": "Gemini 4 Argon with high reasoning effort (deep synthesis & code analysis)", "inputSchema": atomicSchema("Prompt for Argon 4 High")},
+					{"name": "argon_medium", "description": "Gemini 4 Argon with medium reasoning effort (balanced code & analysis)", "inputSchema": atomicSchema("Prompt for Argon 4 Medium")},
+					{"name": "argon_low", "description": "Gemini 4 Argon with low reasoning effort (fast syntax & short answers)", "inputSchema": atomicSchema("Prompt for Argon 4 Low")},
+					{"name": "hydrogen_high", "description": "Gemini 4 Hydrogen with high reasoning effort (deep logic analysis)", "inputSchema": atomicSchema("Prompt for Hydrogen 4 High")},
+					{"name": "hydrogen_middle", "description": "Gemini 4 Hydrogen with middle reasoning effort (balanced daily mode)", "inputSchema": atomicSchema("Prompt for Hydrogen 4 Middle")},
+					{"name": "hydrogen_low", "description": "Gemini 4 Hydrogen with low reasoning effort (fast answers)", "inputSchema": atomicSchema("Prompt for Hydrogen 4 Low")},
 				},
 			},
 		}
@@ -160,7 +198,8 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 			}
 		}
 
-		if callParams.Name == "gemini_web_status" {
+		switch callParams.Name {
+		case "gemini_web_status":
 			loggedIn, err := s.driver.CheckLoginStatus()
 			text := fmt.Sprintf("LoggedIn: %v, Error: %v", loggedIn, err)
 			return &MCPResponse{
@@ -172,56 +211,50 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 					},
 				},
 			}
-		}
 
-		if callParams.Name == "ask_gemini_web" {
+		case "ask_gemini_web":
 			promptStr, _ := callParams.Arguments["prompt"].(string)
 			modelStr, _ := callParams.Arguments["model"].(string)
 			effortStr, _ := callParams.Arguments["effort"].(string)
+			return s.executeAsk(req.ID, promptStr, modelStr, effortStr, extractImages(callParams.Arguments))
 
-			domModel, eff := models.ResolveModel(modelStr, effortStr)
-			var imageFiles []string
-			if rawImgs, ok := callParams.Arguments["image_paths"].([]interface{}); ok {
-				for _, img := range rawImgs {
-					if s, ok := img.(string); ok && s != "" {
-						imageFiles = append(imageFiles, s)
-					}
-				}
-			}
+		case "gemini_pro_web_ask":
+			promptStr, _ := callParams.Arguments["prompt"].(string)
+			modelStr, _ := callParams.Arguments["model"].(string)
+			effortStr, _ := callParams.Arguments["effort"].(string)
+			return s.executeAsk(req.ID, promptStr, modelStr, effortStr, extractImages(callParams.Arguments))
 
-			askReq := engine.AskRequest{
-				Question: promptStr,
-				Model:    domModel,
-				Effort:   eff,
-				Files:    imageFiles,
-			}
+		case "argon_high":
+			promptStr, _ := callParams.Arguments["prompt"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Argon", "high", extractImages(callParams.Arguments))
 
-			resp, err := s.driver.Ask(context.Background(), askReq, nil)
-			if err != nil {
-				return &MCPResponse{
-					JSONRPC: "2.0",
-					ID:      req.ID,
-					Result: map[string]interface{}{
-						"isError": true,
-						"content": []map[string]interface{}{
-							{"type": "text", "text": fmt.Sprintf("Error: %v", err)},
-						},
-					},
-				}
-			}
+		case "argon_medium":
+			promptStr, _ := callParams.Arguments["prompt"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Argon", "medium", extractImages(callParams.Arguments))
 
-			outText := resp.Content
-			if resp.Reasoning != "" {
-				outText = fmt.Sprintf("<thought>\n%s\n</thought>\n\n%s", resp.Reasoning, outText)
-			}
+		case "argon_low":
+			promptStr, _ := callParams.Arguments["prompt"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Argon", "low", extractImages(callParams.Arguments))
 
+		case "hydrogen_high":
+			promptStr, _ := callParams.Arguments["prompt"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Hydrogen", "high", extractImages(callParams.Arguments))
+
+		case "hydrogen_middle", "hydrogen_medium":
+			promptStr, _ := callParams.Arguments["prompt"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Hydrogen", "medium", extractImages(callParams.Arguments))
+
+		case "hydrogen_low":
+			promptStr, _ := callParams.Arguments["prompt"].(string)
+			return s.executeAsk(req.ID, promptStr, "4 Hydrogen", "low", extractImages(callParams.Arguments))
+
+		default:
 			return &MCPResponse{
 				JSONRPC: "2.0",
 				ID:      req.ID,
-				Result: map[string]interface{}{
-					"content": []map[string]interface{}{
-						{"type": "text", "text": outText},
-					},
+				Error: map[string]interface{}{
+					"code":    -32601,
+					"message": fmt.Sprintf("Method not found: %s", callParams.Name),
 				},
 			}
 		}
@@ -245,6 +278,65 @@ func (s *MCPServer) handleRequest(req *MCPRequest) *MCPResponse {
 			},
 		}
 	}
+}
+
+func (s *MCPServer) executeAsk(reqID interface{}, promptStr, modelStr, effortStr string, imageFiles []string) *MCPResponse {
+	domModel, eff := models.ResolveModel(modelStr, effortStr)
+	askReq := engine.AskRequest{
+		Question: promptStr,
+		Model:    domModel,
+		Effort:   eff,
+		Files:    imageFiles,
+	}
+
+	resp, err := s.driver.Ask(context.Background(), askReq, nil)
+	if err != nil {
+		return &MCPResponse{
+			JSONRPC: "2.0",
+			ID:      reqID,
+			Result: map[string]interface{}{
+				"isError": true,
+				"content": []map[string]interface{}{
+					{"type": "text", "text": fmt.Sprintf("Error: %v", err)},
+				},
+			},
+		}
+	}
+
+	outText := resp.Content
+	if resp.Reasoning != "" {
+		outText = fmt.Sprintf("<details>\n<summary>Thinking Process</summary>\n\n%s\n\n</details>\n\n%s", resp.Reasoning, outText)
+	}
+
+	return &MCPResponse{
+		JSONRPC: "2.0",
+		ID:      reqID,
+		Result: map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": outText},
+			},
+		},
+	}
+}
+
+func extractImages(args map[string]interface{}) []string {
+	var imageFiles []string
+	parseList := func(raw interface{}) {
+		if arr, ok := raw.([]interface{}); ok {
+			for _, item := range arr {
+				if s, ok := item.(string); ok && s != "" {
+					imageFiles = append(imageFiles, s)
+				}
+			}
+		}
+	}
+	if raw, ok := args["image_paths"]; ok && raw != nil {
+		parseList(raw)
+	}
+	if raw, ok := args["images"]; ok && raw != nil {
+		parseList(raw)
+	}
+	return imageFiles
 }
 
 // RunStdio starts the MCP stdio handler using os.Stdin and os.Stdout.

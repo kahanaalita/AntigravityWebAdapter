@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -92,15 +93,36 @@ func DetectChromePath(override string) (string, error) {
 	return "", fmt.Errorf("google chrome binary not found on %s", runtime.GOOS)
 }
 
-// DetectLocalProxy probes common proxy ports on localhost.
+// DetectLocalProxy probes common proxy ports on localhost concurrently.
 func DetectLocalProxy() string {
 	ports := []int{10808, 7890, 1080, 10809}
+	resultCh := make(chan string, len(ports))
+	var wg sync.WaitGroup
+
 	for _, port := range ports {
-		addr := fmt.Sprintf("127.0.0.1:%d", port)
-		conn, err := net.DialTimeout("tcp", addr, 150*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return fmt.Sprintf("socks5://127.0.0.1:%d", port)
+		wg.Add(1)
+		go func(p int) {
+			defer wg.Done()
+			addr := fmt.Sprintf("127.0.0.1:%d", p)
+			conn, err := net.DialTimeout("tcp", addr, 60*time.Millisecond)
+			if err == nil {
+				conn.Close()
+				select {
+				case resultCh <- fmt.Sprintf("socks5://127.0.0.1:%d", p):
+				default:
+				}
+			}
+		}(port)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultCh)
+	}()
+
+	for res := range resultCh {
+		if res != "" {
+			return res
 		}
 	}
 	return ""
@@ -144,10 +166,30 @@ func LaunchChrome(cfg LauncherConfig) (*ChromeInstance, error) {
 		return nil, fmt.Errorf("failed to create profile dir: %w", err)
 	}
 
-	// Check if already running
+	// Check if already running in chrome_profile
 	if port, err := ReadActivePort(profileDir); err == nil && port > 0 {
 		return &ChromeInstance{
 			Port:     port,
+			Profile:  profileDir,
+			ProxyURL: cfg.ProxyServer,
+		}, nil
+	}
+
+	// Check fallback profile directory (e.g. legacy profile)
+	altProfile := filepath.Join(cfg.BaseDir, "profile")
+	if port, err := ReadActivePort(altProfile); err == nil && port > 0 {
+		return &ChromeInstance{
+			Port:     port,
+			Profile:  altProfile,
+			ProxyURL: cfg.ProxyServer,
+		}, nil
+	}
+
+	// Check if Chrome is already active on standard 9222 remote debugging port
+	if conn, err := net.DialTimeout("tcp", "127.0.0.1:9222", 100*time.Millisecond); err == nil {
+		conn.Close()
+		return &ChromeInstance{
+			Port:     9222,
 			Profile:  profileDir,
 			ProxyURL: cfg.ProxyServer,
 		}, nil

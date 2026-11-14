@@ -46,13 +46,15 @@ type AskResponse struct {
 
 // Driver orchestrates the Chrome browser and CDP communication.
 type Driver struct {
-	cfg     DriverConfig
-	chrome  *cdp.ChromeInstance
-	client  *cdp.Client
-	pageID  string
-	mu      sync.Mutex
-	initMu  sync.Mutex
-	ready   bool
+	cfg           DriverConfig
+	chrome        *cdp.ChromeInstance
+	client        *cdp.Client
+	pageID        string
+	mu            sync.Mutex
+	initMu        sync.Mutex
+	ready         bool
+	currentModel  string
+	currentEffort string
 }
 
 // NewDriver creates an automation driver instance.
@@ -68,7 +70,13 @@ func (d *Driver) EnsureReady() error {
 	defer d.initMu.Unlock()
 
 	if d.ready && d.client != nil {
-		return nil
+		if d.client.IsAlive() {
+			return nil
+		}
+		// Reset dead connection
+		d.ready = false
+		_ = d.client.Close()
+		d.client = nil
 	}
 
 	launcherCfg := cdp.LauncherConfig{
@@ -123,7 +131,31 @@ func (d *Driver) EnsureReady() error {
 		}
 	}
 
+	// Wait for SPA DOM and Quill editor readiness
+	_ = d.WaitForPageReady(15 * time.Second)
+
 	return nil
+}
+
+// WaitForPageReady polls until document.readyState is complete and Quill editor is mounted.
+func (d *Driver) WaitForPageReady(timeout time.Duration) error {
+	checkScript := `(() => {
+		const isReady = document.readyState === 'complete';
+		const editor = document.querySelector('rich-textarea div.ql-editor, rich-textarea, [contenteditable="true"]');
+		return isReady && !!editor;
+	})()`
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		val, err := d.client.Evaluate(checkScript, false)
+		if err == nil {
+			if ok, _ := val.(bool); ok {
+				return nil
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for Gemini page and editor ready")
 }
 
 // CheckLoginStatus verifies if user is authenticated in Gemini.
@@ -170,6 +202,28 @@ func (d *Driver) CheckLoginStatus() (bool, error) {
 
 // SelectModelAndReasoning sets the desired model and thinking/reasoning effort level.
 func (d *Driver) SelectModelAndReasoning(targetModel, targetEffort string) error {
+	// 1. Fast path: in-memory cache check (0ms delay)
+	if d.currentModel == targetModel && d.currentEffort == targetEffort {
+		return nil
+	}
+
+	// 2. Fast path: check current text on the button in DOM
+	checkScript := fmt.Sprintf(`((targetModel, targetEffort) => {
+		const modeBtn = document.querySelector('button.input-area-switch, bard-mode-switcher button, [data-test-id="bard-mode-menu-button"]');
+		const curText = modeBtn ? (modeBtn.innerText || '').toLowerCase() : '';
+		const curAria = modeBtn ? (modeBtn.getAttribute('aria-label') || '').toLowerCase() : '';
+		const full = curText + ' ' + curAria;
+		return full.includes(targetModel.toLowerCase());
+	})(%q, %q)`, targetModel, targetEffort)
+
+	if res, err := d.client.Evaluate(checkScript, false); err == nil {
+		if matched, _ := res.(bool); matched && targetEffort == "" {
+			d.currentModel = targetModel
+			d.currentEffort = targetEffort
+			return nil
+		}
+	}
+
 	script := fmt.Sprintf(`((targetModel, targetEffort) => {
 		const EFFORT_SYNONYMS = {
 			low: ['низкий', 'быстрый', 'low', 'fast', 'fast and efficient'],
@@ -253,6 +307,9 @@ func (d *Driver) SelectModelAndReasoning(targetModel, targetEffort string) error
 		"type": "keyUp", "key": "Escape", "code": "Escape", "windowsVirtualKeyCode": 27,
 	})
 
+	d.currentModel = targetModel
+	d.currentEffort = targetEffort
+
 	return nil
 }
 
@@ -333,55 +390,36 @@ func (d *Driver) UploadFiles(files []string) error {
 	return nil
 }
 
-// InsertText types or injects prompt text into the Quill editor.
+// InsertText types or injects prompt text into the Quill editor without breaking its internal model.
 func (d *Driver) InsertText(text string) error {
-	// Focus editor
-	focusScript := `(() => {
+	script := fmt.Sprintf(`((text) => {
 		const ed = document.querySelector('rich-textarea div.ql-editor, [contenteditable="true"]');
-		if (ed) {
-			ed.focus();
-			return true;
-		}
-		return false;
-	})()`
+		if (!ed) return false;
+		ed.focus();
 
-	if _, err := d.client.Evaluate(focusScript, false); err != nil {
-		return err
-	}
+		// Clear via Selection API
+		const sel = window.getSelection();
+		sel.selectAllChildren(ed);
 
-	// For short messages, level 1 DOM insertion + input event dispatch
-	if len(text) < 4000 {
-		insertScript := fmt.Sprintf(`((text) => {
-			const ed = document.querySelector('rich-textarea div.ql-editor, [contenteditable="true"]');
-			if (!ed) return false;
+		// Insert via execCommand to keep Quill virtual DOM & submit button state synchronized
+		const ok = document.execCommand('insertText', false, text);
+		if (!ok) {
 			while (ed.firstChild) ed.removeChild(ed.firstChild);
 			const p = document.createElement('p');
 			p.textContent = text;
 			ed.appendChild(p);
 			ed.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-			return true;
-		})(%q)`, text)
-		_, err := d.client.Evaluate(insertScript, false)
+		}
+		return true;
+	})(%q)`, text)
+
+	val, err := d.client.Evaluate(script, false)
+	if err != nil {
 		return err
 	}
-
-	// For long messages (> 4000 chars), chunk via Input.insertText
-	const chunkSize = 4000
-	for i := 0; i < len(text); i += chunkSize {
-		end := i + chunkSize
-		if end > len(text) {
-			end = len(text)
-		}
-		chunk := text[i:end]
-		_, err := d.client.Call("Input.insertText", map[string]interface{}{
-			"text": chunk,
-		})
-		if err != nil {
-			return err
-		}
-		time.Sleep(40 * time.Millisecond)
+	if success, _ := val.(bool); !success {
+		return fmt.Errorf("quill editor element not found in DOM")
 	}
-
 	return nil
 }
 
@@ -441,7 +479,6 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 	if err := d.InsertText(req.Question); err != nil {
 		return nil, fmt.Errorf("failed to insert question into editor: %w", err)
 	}
-	time.Sleep(300 * time.Millisecond)
 
 	// Count responses prior to submit
 	countVal, _ := d.client.Evaluate("document.querySelectorAll('.model-response-text, message-content, [data-test-id*=\"model-response\"]').length", false)
@@ -455,8 +492,21 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 		return nil, fmt.Errorf("failed to submit prompt: %w", err)
 	}
 
-	// Polling loop
+	// Wait for the new response element to appear in DOM (prevents reading previous response)
 	targetIndex := initialCount
+	waitDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(waitDeadline) {
+		cVal, err := d.client.Evaluate("document.querySelectorAll('.model-response-text, message-content, [data-test-id*=\"model-response\"]').length", false)
+		if err == nil {
+			if curLen, ok := cVal.(float64); ok && int(curLen) > initialCount {
+				targetIndex = int(curLen) - 1
+				break
+			}
+		}
+		time.Sleep(60 * time.Millisecond)
+	}
+
+	// Polling loop
 	var fullThoughts, fullContent string
 	lastThoughtsLen := 0
 	lastContentLen := 0
@@ -465,8 +515,11 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 
 	extractScript := fmt.Sprintf(`((targetIndex) => {
 		const responses = document.querySelectorAll('.model-response-text, message-content, [data-test-id*="model-response"]');
-		const idx = targetIndex < responses.length ? targetIndex : responses.length - 1;
-		const latest = responses[idx];
+		if (responses.length <= targetIndex) {
+			const stopBtn = document.querySelector('button[aria-label*="Остановить"], button[aria-label*="Stop"], button.stop-button');
+			return { thoughts: '', content: '', isGenerating: !!stopBtn };
+		}
+		const latest = responses[targetIndex];
 		if (!latest) return null;
 
 		const thoughtsEl = latest.querySelector('model-thoughts, .model-thoughts, [data-test-id*="thoughts"], thinking-overlay');
@@ -485,7 +538,7 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 		};
 	})(%d)`, targetIndex)
 
-	ticker := time.NewTicker(150 * time.Millisecond)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -532,16 +585,16 @@ func (d *Driver) Ask(ctx context.Context, req AskRequest, onDelta func(reasoning
 				onDelta(rDelta, cDelta)
 			}
 
-			// Check completion stability
+			// Check completion stability: 2 ticks (200ms) is sufficient after generation completes
 			if generationStarted && !isGenerating && (len(content) > 0 || len(thoughts) > 0) {
 				if len(content) == lastContentLen && len(thoughts) == lastThoughtsLen {
 					stableChecks++
-					if stableChecks >= 5 { // 5 * 150ms = 750ms stable
+					if stableChecks >= 2 { // 2 * 100ms = 200ms stable
 						openCalls := strings.Count(fullContent, "```tool_call")
 						closeCalls := strings.Count(fullContent, "```")
 						if openCalls > 0 && closeCalls%2 != 0 {
 							// Unclosed code block, wait extra
-							time.Sleep(1 * time.Second)
+							time.Sleep(500 * time.Millisecond)
 						} else {
 							goto done
 						}

@@ -60,6 +60,13 @@ func DialWS(rawURL string) (*WSConn, error) {
 		return nil, fmt.Errorf("websocket dial tcp failed: %w", err)
 	}
 
+	// Disable Nagle's algorithm for instant CDP packet dispatch
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		_ = tcpConn.SetNoDelay(true)
+		_ = tcpConn.SetKeepAlive(true)
+		_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
+	}
+
 	path := u.RequestURI()
 	if path == "" {
 		path = "/"
@@ -270,19 +277,25 @@ func (ws *WSConn) writeFrame(opcode byte, data []byte) error {
 	}
 	header = append(header, mask...)
 
-	maskedData := make([]byte, length)
+	// Single buffer packet to avoid delayed ACK / Nagle latency penalty
+	packet := make([]byte, len(header)+length)
+	copy(packet, header)
 	for i := 0; i < length; i++ {
-		maskedData[i] = data[i] ^ mask[i%4]
+		packet[len(header)+i] = data[i] ^ mask[i%4]
 	}
 
-	if _, err := ws.conn.Write(header); err != nil {
-		return err
-	}
-	if _, err := ws.conn.Write(maskedData); err != nil {
+	if _, err := ws.conn.Write(packet); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// IsClosed reports if the WebSocket connection is closed.
+func (ws *WSConn) IsClosed() bool {
+	ws.closeMu.Lock()
+	defer ws.closeMu.Unlock()
+	return ws.closed
 }
 
 func (ws *WSConn) handleError(err error) {

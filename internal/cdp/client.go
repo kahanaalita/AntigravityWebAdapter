@@ -214,6 +214,23 @@ func (c *Client) Navigate(url string) error {
 	return err
 }
 
+// IsAlive tests if the CDP connection is responsive with a 1-second timeout ping.
+func (c *Client) IsAlive() bool {
+	c.mu.Lock()
+	if c.closed || c.ws == nil || c.ws.IsClosed() {
+		c.mu.Unlock()
+		return false
+	}
+	c.mu.Unlock()
+
+	params := map[string]interface{}{
+		"expression":    "1",
+		"returnByValue": true,
+	}
+	_, err := c.CallWithTimeout("Runtime.evaluate", params, 1*time.Second)
+	return err == nil
+}
+
 // Close closes the underlying WebSocket connection and terminates all pending calls.
 func (c *Client) Close() error {
 	c.mu.Lock()
