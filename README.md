@@ -1,12 +1,12 @@
 # AntigravityWebAdapter (Go Edition) 🚀
 
-> **Высокопроизводительный автономный Go-адаптер и MCP-сервер для бесшовной интеграции Google Antigravity с веб-версией Google AI Pro** (модели **Gemini 4 Hydrogen**, **Gemini 4 Argon**, **Gemini 3.1 Pro** и **Gemini 3.5 Flash-Lite**).
+> **Высокопроизводительный автономный Go-адаптер и MCP-сервер для бесшовной интеграции Google Antigravity с веб-версией Google AI Pro** (модели **Gemini 4 Hydrogen**, **Gemini 4 Argon**).
 
 `AntigravityWebAdapter` связывает интерфейс Antigravity с веб-интерфейсом `gemini.google.com/app`, позволяя использовать полную мощь моделей тарифа Google AI Pro без поминутной тарификации внешних облачных API (Vertex AI / Generative Language API).
 
 Реализация выполнена на чистом Go: **0 внешних зависимостей** (zero external dependencies), мгновенный холодный старт за **<10 мс**, потребление оперативной памяти всего **15–20 МБ** и единый статический бинарник.
 
-> 💡 **Используете DeepSeek Harness (DSH)?** Руководство по подключению через нативный MCP-клиент или локальный HTTP-шлюз находится в [DEEPSEEK_HARNESS_SETUP.md](DEEPSEEK_HARNESS_SETUP.md).
+>  **Используете DeepSeek Harness (DSH)?** Руководство по подключению через нативный MCP-клиент или локальный HTTP-шлюз находится в [DEEPSEEK_HARNESS_SETUP.md](DEEPSEEK_HARNESS_SETUP.md).
 
 ---
 
