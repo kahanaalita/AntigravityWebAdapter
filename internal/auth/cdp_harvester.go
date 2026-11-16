@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -97,75 +96,7 @@ func (s *SessionManager) harvestCookiesFromCDPLocked(ctx context.Context) error 
 }
 
 func resolveWebSocketDebuggerURL(ctx context.Context, endpoint string) (string, error) {
-	if strings.HasPrefix(endpoint, "ws://") || strings.HasPrefix(endpoint, "wss://") {
-		return endpoint, nil
-	}
-
-	clean := strings.TrimRight(endpoint, "/")
-
-	// In newer Chrome versions, Network.getCookies is not supported on the browser target (/json/version).
-	// We need to attach to an active page target (/json/list or /json).
-	targetURL := clean + "/json"
-	req, err := http.NewRequestWithContext(ctx, "GET", targetURL, nil)
-	if err != nil {
-		return "", err
-	}
-
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Do(req)
-	if err == nil && resp.StatusCode == http.StatusOK {
-		defer resp.Body.Close()
-		var targets []struct {
-			Type                 string `json:"type"`
-			URL                  string `json:"url"`
-			WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&targets); err == nil {
-			// First look for gemini.google.com page
-			for _, t := range targets {
-				if t.Type == "page" && strings.Contains(t.URL, "gemini.google.com") && t.WebSocketDebuggerURL != "" {
-					return t.WebSocketDebuggerURL, nil
-				}
-			}
-			// Fallback to any page
-			for _, t := range targets {
-				if t.Type == "page" && t.WebSocketDebuggerURL != "" {
-					return t.WebSocketDebuggerURL, nil
-				}
-			}
-		}
-	} else if resp != nil {
-		resp.Body.Close()
-	}
-
-	reqURL := clean + "/json/version"
-
-	req, err = http.NewRequestWithContext(ctx, "GET", reqURL, nil)
-	if err != nil {
-		return "", err
-	}
-
-	client = &http.Client{Timeout: 3 * time.Second}
-	resp, err = client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request %s: %w", reqURL, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status from %s: %d", reqURL, resp.StatusCode)
-	}
-
-	var ver CDPVersionInfo
-	if err := json.NewDecoder(resp.Body).Decode(&ver); err != nil {
-		return "", fmt.Errorf("decode json/version: %w", err)
-	}
-
-	if ver.WebSocketDebuggerURL == "" {
-		return "", errors.New("webSocketDebuggerUrl is empty in json/version response")
-	}
-
-	return ver.WebSocketDebuggerURL, nil
+	return resolveGeminiTargetURL(ctx, endpoint)
 }
 
 func fetchCookiesViaWebSocket(ctx context.Context, wsURL string) ([]CDPCookie, error) {

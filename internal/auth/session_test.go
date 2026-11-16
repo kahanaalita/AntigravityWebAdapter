@@ -1,9 +1,13 @@
 package auth
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -150,6 +154,20 @@ func TestNewSessionManager_Init(t *testing.T) {
 	}
 }
 
+func TestNewSessionManager_TLSTimeoutEnv(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookies.json")
+
+	t.Setenv("TLS_CLIENT_TIMEOUT", "1800")
+	sm, err := NewSessionManager(cookieFile, "")
+	if err != nil {
+		t.Fatalf("NewSessionManager with custom TLS_CLIENT_TIMEOUT failed: %v", err)
+	}
+	if sm == nil || sm.TLSClient() == nil {
+		t.Fatalf("expected non-nil SessionManager and TLSClient")
+	}
+}
+
 func TestIsChromeRunning(t *testing.T) {
 	// Should execute without panicking
 	_ = isChromeRunning(t.Context())
@@ -167,4 +185,175 @@ func TestCookieRotator_EmptyStore(t *testing.T) {
 	if err := rotator.RotateOnce(t.Context()); err != nil {
 		t.Errorf("expected nil error for empty store, got %v", err)
 	}
+}
+
+func TestRefreshWizData_LocalizationRedirect(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app" && r.URL.RawQuery == "" {
+			// Simulate 302 redirect for localization
+			http.SetCookie(w, &http.Cookie{
+				Name:  "TEST_SESSION_COOKIE",
+				Value: "cookie_value_from_redirect",
+				Path:  "/",
+			})
+			w.Header().Set("Location", "/app?hl=ru")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/app" && r.URL.Query().Get("hl") == "ru" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<!doctype html><html><head><script>
+window.WIZ_global_data = {
+  "SNlM0e":"token_loc_123",
+  "cfb2h":"bl_loc_456",
+  "FdrFJe":"sid_loc_789"
+};
+</script></head><body></body></html>`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookies.json")
+	sm, err := NewSessionManager(cookieFile, "")
+	if err != nil {
+		t.Fatalf("NewSessionManager failed: %v", err)
+	}
+	sm.baseURL = srv.URL
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	wiz, err := sm.RefreshWizData(ctx)
+	if err != nil {
+		t.Fatalf("RefreshWizData failed with localization redirect: %v", err)
+	}
+
+	if wiz.At != "token_loc_123" {
+		t.Errorf("expected At 'token_loc_123', got %q", wiz.At)
+	}
+	if wiz.Bl != "bl_loc_456" {
+		t.Errorf("expected Bl 'bl_loc_456', got %q", wiz.Bl)
+	}
+	if wiz.Sid != "sid_loc_789" {
+		t.Errorf("expected Sid 'sid_loc_789', got %q", wiz.Sid)
+	}
+
+	// Verify cookie persistence from redirect
+	val, ok := sm.Store().Get("TEST_SESSION_COOKIE")
+	if !ok || val != "cookie_value_from_redirect" {
+		t.Errorf("expected cookie TEST_SESSION_COOKIE to be saved, got %v (ok=%v)", val, ok)
+	}
+
+	// Verify cookie was saved to disk
+	savedStore := NewCookieStore(cookieFile)
+	if err := savedStore.Load(); err != nil {
+		t.Fatalf("failed to load saved store: %v", err)
+	}
+	valDisk, okDisk := savedStore.Get("TEST_SESSION_COOKIE")
+	if !okDisk || valDisk != "cookie_value_from_redirect" {
+		t.Errorf("expected cookie saved on disk, got %v (ok=%v)", valDisk, okDisk)
+	}
+}
+
+func TestRefreshWizData_AccountsLoginRedirect(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://accounts.google.com/ServiceLogin?continue=https://gemini.google.com/app")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookies.json")
+	sm, err := NewSessionManager(cookieFile, "http://127.0.0.1:54321")
+	if err != nil {
+		t.Fatalf("NewSessionManager failed: %v", err)
+	}
+	sm.baseURL = srv.URL
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err = sm.RefreshWizData(ctx)
+	if err == nil {
+		t.Fatal("expected error on accounts.google.com login redirect, got nil")
+	}
+}
+
+func TestAutoHarvest_NoSpamWhenCDPUnavailable(t *testing.T) {
+	// Isolate HOME so Safari cookies aren't read from real user profile
+	t.Setenv("HOME", t.TempDir())
+
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookies.json")
+	sm, err := NewSessionManager(cookieFile, "http://127.0.0.1:54321")
+	if err != nil {
+		t.Fatalf("NewSessionManager failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	err = sm.AutoHarvest(ctx)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected error when CDP and Safari are unavailable, got nil")
+	}
+	if !strings.Contains(err.Error(), "--remote-debugging-port=9222") {
+		t.Errorf("expected instruction in error, got: %v", err)
+	}
+	if elapsed > 3*time.Second {
+		t.Errorf("AutoHarvest took too long (%v), should return promptly without opening browsers", elapsed)
+	}
+}
+
+func TestRefreshWizData_MutexNotHeldDuringNetwork(t *testing.T) {
+	netStarted := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(netStarted)
+		time.Sleep(300 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`<!doctype html><html><head><script>
+window.WIZ_global_data = {
+  "SNlM0e":"token_async",
+  "cfb2h":"bl_async",
+  "FdrFJe":"sid_async"
+};
+</script></head><body></body></html>`))
+	}))
+	defer srv.Close()
+
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookies.json")
+	sm, err := NewSessionManager(cookieFile, "")
+	if err != nil {
+		t.Fatalf("NewSessionManager failed: %v", err)
+	}
+	sm.baseURL = srv.URL
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, _ = sm.RefreshWizData(context.Background())
+	}()
+
+	// Wait for the HTTP request to begin
+	<-netStarted
+
+	// During the network request, sm.CDPURL() should be readable immediately without waiting for the 300ms network call
+	readStart := time.Now()
+	_ = sm.CDPURL()
+	readElapsed := time.Since(readStart)
+
+	if readElapsed > 50*time.Millisecond {
+		t.Errorf("sm.CDPURL() was blocked for %v by RefreshWizData! Write lock held during network request", readElapsed)
+	}
+
+	wg.Wait()
 }

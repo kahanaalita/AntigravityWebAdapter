@@ -150,3 +150,118 @@ func TestResolveExplicit_NonExistentFile(t *testing.T) {
 		t.Fatalf("Expected error for explicitly requested nonexistent file, got nil")
 	}
 }
+
+func TestResolveClipboard_EmptyOrErrorDoesNotCrash(t *testing.T) {
+	resolver := NewImageResolver("")
+	prompt := "Please examine @clipboard for issues"
+	cleaned, imgs, err := resolver.ResolveFromPromptAndList(prompt, nil)
+	if err != nil {
+		t.Fatalf("ResolveFromPromptAndList should not fail on empty clipboard: %v", err)
+	}
+	if strings.Contains(cleaned, "@clipboard") {
+		t.Errorf("Cleaned prompt should not contain @clipboard: %q", cleaned)
+	}
+	if !strings.Contains(cleaned, "Please examine for issues") {
+		t.Errorf("Cleaned prompt mismatch: %q", cleaned)
+	}
+	_ = imgs // May or may not contain an image depending on actual clipboard state in OS, but must not error
+}
+
+func TestResolveClipboard_IsolatedTokenMatching(t *testing.T) {
+	resolver := NewImageResolver("")
+	prompt := "Check user@clipboard.com and @clipboard-special together with @clipboard please"
+	cleaned, _, err := resolver.ResolveFromPromptAndList(prompt, nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !strings.Contains(cleaned, "user@clipboard.com") {
+		t.Errorf("Prompt should preserve user@clipboard.com: %q", cleaned)
+	}
+	if !strings.Contains(cleaned, "@clipboard-special") {
+		t.Errorf("Prompt should preserve @clipboard-special: %q", cleaned)
+	}
+	if strings.Contains(cleaned, " together with @clipboard please") {
+		t.Errorf("Isolated @clipboard should have been removed: %q", cleaned)
+	}
+}
+
+func TestResolve_DeduplicationBySha256(t *testing.T) {
+	tmpDir := t.TempDir()
+	imgData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x01}
+
+	file1 := filepath.Join(tmpDir, "file1.png")
+	file2 := filepath.Join(tmpDir, "file2.png")
+	if err := os.WriteFile(file1, imgData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file2, imgData, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := NewImageResolver(tmpDir)
+
+	// Explicit duplicate paths with same content
+	_, imgs, err := resolver.ResolveFromPromptAndList("test prompt", []string{file1, file2})
+	if err != nil {
+		t.Fatalf("ResolveFromPromptAndList failed: %v", err)
+	}
+	if len(imgs) != 1 {
+		t.Errorf("Expected 1 deduplicated image, got %d", len(imgs))
+	}
+
+	// Mixed prompt reference and explicit list reference to same file
+	prompt := "Check @" + filepath.Base(file1) + " please"
+	cleaned, imgsMixed, err := resolver.ResolveFromPromptAndList(prompt, []string{file2})
+	if err != nil {
+		t.Fatalf("ResolveFromPromptAndList mixed failed: %v", err)
+	}
+	if len(imgsMixed) != 1 {
+		t.Errorf("Expected 1 deduplicated image for mixed source, got %d", len(imgsMixed))
+	}
+	if strings.Contains(cleaned, "@file1.png") {
+		t.Errorf("Prompt should have removed @file1.png: %q", cleaned)
+	}
+}
+
+func TestExtractUploadRef_RupioNestedJson(t *testing.T) {
+	hdr := make(fhttp.Header)
+
+	// Nested photopicker_service_attachment_token (modern Google Rupio)
+	rupioBody := `{
+		"sessionStatus": {
+			"state": "FINALIZED",
+			"additionalInfo": {
+				"uploader_service.GoogleRupioAdditionalInfo": {
+					"customerSpecificInfo": {
+						"photopicker_service_attachment_token": "CAESY2F0X3Rva2VuXzEyMzQ1Njc4OQ"
+					}
+				}
+			}
+		}
+	}`
+	ref := extractUploadRef(rupioBody, hdr)
+	if ref != "CAESY2F0X3Rva2VuXzEyMzQ1Njc4OQ" {
+		t.Errorf("Expected photopicker token, got %q", ref)
+	}
+
+	// Direct resourceId
+	resIDBody := `{"sessionStatus": {"state": "FINALIZED"}, "resourceId": "res_id_abc_123"}`
+	ref = extractUploadRef(resIDBody, hdr)
+	if ref != "res_id_abc_123" {
+		t.Errorf("Expected resourceId, got %q", ref)
+	}
+
+	// Direct upload_ref
+	uploadRefBody := `{"upload_ref": "upload_ref_xyz_789"}`
+	ref = extractUploadRef(uploadRefBody, hdr)
+	if ref != "upload_ref_xyz_789" {
+		t.Errorf("Expected upload_ref, got %q", ref)
+	}
+
+	// resource.url fallback
+	resURLBody := `{"resource": {"url": "https://gemini.google.com/upload/photo_001"}}`
+	ref = extractUploadRef(resURLBody, hdr)
+	if ref != "https://gemini.google.com/upload/photo_001" {
+		t.Errorf("Expected resource.url, got %q", ref)
+	}
+}

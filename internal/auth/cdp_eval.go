@@ -20,9 +20,19 @@ type cdpEvalResponse struct {
 	ID     int `json:"id"`
 	Result struct {
 		Result struct {
-			Type  string `json:"type"`
-			Value string `json:"value"`
+			Type        string `json:"type"`
+			Subtype     string `json:"subtype"`
+			Value       string `json:"value"`
+			Description string `json:"description"`
 		} `json:"result"`
+		ExceptionDetails *struct {
+			Text         string `json:"text"`
+			LineNumber   int    `json:"lineNumber"`
+			ColumnNumber int    `json:"columnNumber"`
+			Exception    *struct {
+				Description string `json:"description"`
+			} `json:"exception"`
+		} `json:"exceptionDetails"`
 	} `json:"result"`
 	Error *struct {
 		Code    int    `json:"code"`
@@ -37,9 +47,9 @@ func (s *SessionManager) FetchWizDataViaCDP(ctx context.Context) (*WizData, erro
 		endpoint = "http://127.0.0.1:9222"
 	}
 
-	wsURL, err := resolveWebSocketDebuggerURL(ctx, endpoint)
+	wsURL, err := resolveGeminiTargetURL(ctx, endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("resolve cdp page target: %w", err)
+		return nil, fmt.Errorf("resolve gemini cdp page target: %w", err)
 	}
 
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
@@ -94,7 +104,15 @@ func (s *SessionManager) FetchWizDataViaCDP(ctx context.Context) (*WizData, erro
 		}
 		if resp.ID == 101 {
 			if resp.Error != nil {
-				return nil, fmt.Errorf("cdp runtime error: %s", resp.Error.Message)
+				return nil, fmt.Errorf("cdp runtime error: %s (code %d)", resp.Error.Message, resp.Error.Code)
+			}
+			if resp.Result.ExceptionDetails != nil {
+				ex := resp.Result.ExceptionDetails
+				desc := ex.Text
+				if ex.Exception != nil && ex.Exception.Description != "" {
+					desc = ex.Exception.Description
+				}
+				return nil, fmt.Errorf("browser js exception at line %d: %s", ex.LineNumber, desc)
 			}
 			var data struct {
 				SNlM0e string `json:"SNlM0e"`

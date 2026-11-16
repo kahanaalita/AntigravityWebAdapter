@@ -2,6 +2,7 @@ package geminiweb
 
 import (
 	"encoding/json"
+	"errors"
 	"net/url"
 	"strings"
 	"testing"
@@ -277,5 +278,111 @@ func TestParseStream_MixedThoughtTagAndBlock(t *testing.T) {
 	}
 	if resp.Text != "Итоговый результат." {
 		t.Errorf("Expected text 'Итоговый результат.', got %q", resp.Text)
+	}
+}
+
+func TestParseStream_EmptyOrInvalidReturnsErrEmptyParsedResponse(t *testing.T) {
+	testCases := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "completely empty input",
+			input: "",
+		},
+		{
+			name:  "html error page 403",
+			input: "<!DOCTYPE html><html><head><title>403 Forbidden</title></head><body>Access Denied</body></html>",
+		},
+		{
+			name:  "magic prefix only",
+			input: ")]}'\n[]\n",
+		},
+		{
+			name:  "rpc envelope with empty inner array",
+			input: ")]}'\n[[\"wrb.fr\",null,\"[]\"]]\n",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := ParseStream(strings.NewReader(tc.input))
+			if err == nil {
+				t.Fatalf("Expected error for %s, got nil (resp: %+v)", tc.name, resp)
+			}
+			if !errors.Is(err, ErrEmptyParsedResponse) {
+				t.Errorf("Expected ErrEmptyParsedResponse, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestParseStream_PrimaryCandidateNotOverwritten(t *testing.T) {
+	// Candidate 0 should be chosen, candidate 1 (draft 2) should NOT overwrite choice_id or text
+	innerObj := []any{
+		nil,
+		[]any{"c_multi_01", "r_multi_02"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_primary_draft_01",
+				[]any{"Основной черновик (кандидат 0)."},
+			},
+			[]any{
+				"rc_secondary_draft_02",
+				[]any{"Вторичный черновик (кандидат 1, должен быть проигнорирован)."},
+			},
+		},
+	}
+	innerBytes, _ := json.Marshal(innerObj)
+	envelope := [][]any{{"wrb.fr", nil, string(innerBytes)}}
+	envelopeBytes, _ := json.Marshal(envelope)
+	rawStream := ")]}'\n" + string(envelopeBytes) + "\n"
+
+	resp, err := ParseStream(strings.NewReader(rawStream))
+	if err != nil {
+		t.Fatalf("ParseStream failed: %v", err)
+	}
+
+	if resp.ChoiceID != "rc_primary_draft_01" {
+		t.Errorf("Expected ChoiceID 'rc_primary_draft_01', got %q", resp.ChoiceID)
+	}
+	if resp.Text != "Основной черновик (кандидат 0)." {
+		t.Errorf("Expected primary candidate text, got %q", resp.Text)
+	}
+}
+
+func TestParseStream_CandidateAccumulatesAllParts(t *testing.T) {
+	// Candidate with multiple text parts in cand[1]
+	innerObj := []any{
+		nil,
+		[]any{"c_parts_01", "r_parts_02"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_parts_03",
+				[]any{
+					"Часть 1. ",
+					"Часть 2. ",
+					[]any{"Подчасть 3. ", "Подчасть 4."},
+				},
+			},
+		},
+	}
+	innerBytes, _ := json.Marshal(innerObj)
+	envelope := [][]any{{"wrb.fr", nil, string(innerBytes)}}
+	envelopeBytes, _ := json.Marshal(envelope)
+	rawStream := ")]}'\n" + string(envelopeBytes) + "\n"
+
+	resp, err := ParseStream(strings.NewReader(rawStream))
+	if err != nil {
+		t.Fatalf("ParseStream failed: %v", err)
+	}
+
+	expected := "Часть 1. Часть 2. Подчасть 3. Подчасть 4."
+	if resp.Text != expected {
+		t.Errorf("Expected accumulated text %q, got %q", expected, resp.Text)
 	}
 }

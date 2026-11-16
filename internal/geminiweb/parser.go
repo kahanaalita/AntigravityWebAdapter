@@ -3,15 +3,17 @@ package geminiweb
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"io"
 	"regexp"
 	"strings"
 )
 
 var (
-	magicPrefix    = []byte(")]}'\n")
-	reThoughtTag   = regexp.MustCompile(`(?is)<thought(?:\s+[^>]*)?>(.*?)</thought>`)
-	reThoughtBlock = regexp.MustCompile(`(?is):::thought\s*(.*?)(?:\n\s*:::|\s+:::)(?:[\r\n\s]+|$)`)
+	ErrEmptyParsedResponse = errors.New("empty response or failed to parse Gemini stream")
+	magicPrefix            = []byte(")]}'\n")
+	reThoughtTag           = regexp.MustCompile(`(?is)<thought(?:\s+[^>]*)?>(.*?)</thought>`)
+	reThoughtBlock         = regexp.MustCompile(`(?is):::thought\s*(.*?)(?:\n\s*:::|\s+:::)(?:[\r\n\s]+|$)`)
 )
 
 // ParsedResponse holds the consolidated output from StreamGenerate.
@@ -150,6 +152,10 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 	resp.Thought = strings.TrimSpace(thoughtBuilder.String())
 	resp.Text = strings.TrimSpace(fullText)
 
+	if resp.Text == "" && resp.Thought == "" {
+		return nil, ErrEmptyParsedResponse
+	}
+
 	return resp, nil
 }
 
@@ -196,44 +202,48 @@ func extractFromInnerData(inner []any, resp *ParsedResponse, thoughtB *strings.B
 		}
 	}
 
-	// 2. Candidates from inner[4]
+	// 2. Candidates from inner[4]: process primary candidate (candidates[0])
 	if len(inner) > 4 {
-		if candidates, ok := inner[4].([]any); ok {
-			for _, candAny := range candidates {
-				cand, ok := candAny.([]any)
-				if !ok || len(cand) == 0 {
-					continue
-				}
-
-				// Candidate ID (choice_id)
+		if candidates, ok := inner[4].([]any); ok && len(candidates) > 0 {
+			// Process only candidate 0 for ChoiceID and Text
+			if cand, ok := candidates[0].([]any); ok && len(cand) > 0 {
 				if choiceID, ok := cand[0].(string); ok && choiceID != "" {
 					resp.ChoiceID = choiceID
 				}
 
-				// Candidate parts inner[4][0][1]
 				if len(cand) > 1 {
 					if parts, ok := cand[1].([]any); ok {
+						var candText strings.Builder
 						for _, pAny := range parts {
 							if pStr, ok := pAny.(string); ok && pStr != "" {
-								// Check if it's the latest replacement or delta
-								// In StreamGenerate, the candidate text part usually contains the full accumulated text
-								textB.Reset()
-								textB.WriteString(pStr)
+								candText.WriteString(pStr)
 							} else if pArr, ok := pAny.([]any); ok {
-								// Sometimes part is nested array
 								for _, sub := range pArr {
 									if subStr, ok := sub.(string); ok && subStr != "" {
-										textB.WriteString(subStr)
+										candText.WriteString(subStr)
 									}
 								}
 							}
 						}
+						// In StreamGenerate, each chunk contains the full accumulated text of the candidate
+						if candText.Len() > 0 {
+							textB.Reset()
+							textB.WriteString(candText.String())
+						}
 					}
 				}
 
-				// Check for thinking trace in choice slots (e.g. cand[2], cand[3], cand[4])
 				for i := 2; i < len(cand); i++ {
 					inspectThinkingTrace(cand[i], thoughtB)
+				}
+			}
+
+			// Also inspect thinking traces in other candidates if present
+			for cIdx := 1; cIdx < len(candidates); cIdx++ {
+				if cand, ok := candidates[cIdx].([]any); ok {
+					for i := 2; i < len(cand); i++ {
+						inspectThinkingTrace(cand[i], thoughtB)
+					}
 				}
 			}
 		}

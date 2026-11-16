@@ -2,6 +2,7 @@ package media
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -19,8 +20,8 @@ import (
 )
 
 var (
-	reImgPath = regexp.MustCompile(`@([^\s"']+\.(png|jpg|jpeg|webp|gif|heic))`)
-	reAtClip  = regexp.MustCompile(`@(clipboard)`)
+	reImgPath = regexp.MustCompile(`(?:^|\s)@([^\s"']+\.(png|jpg|jpeg|webp|gif|heic))(?:\s|$)`)
+	reAtClip  = regexp.MustCompile(`(?:^|\s)@(clipboard)(?:\s|$)`)
 )
 
 // ResolvedImage holds normalized image data ready for upload.
@@ -47,49 +48,68 @@ func NewImageResolver(workDir string) *ImageResolver {
 // Returns cleaned prompt text and resolved images.
 func (r *ImageResolver) ResolveFromPromptAndList(prompt string, explicitPaths []string) (string, []ResolvedImage, error) {
 	var images []ResolvedImage
-	seenPaths := make(map[string]bool)
+	seenHashes := make(map[string]bool)
+
+	addImage := func(img *ResolvedImage) {
+		if img == nil || len(img.Data) == 0 {
+			return
+		}
+		hash := sha256.Sum256(img.Data)
+		hashStr := hex.EncodeToString(hash[:])
+		if !seenHashes[hashStr] {
+			seenHashes[hashStr] = true
+			images = append(images, *img)
+		}
+	}
+
+	cleanedPrompt := prompt
 
 	// 1. Check for @clipboard in prompt
-	cleanedPrompt := prompt
-	if reAtClip.MatchString(prompt) {
+	if reAtClip.MatchString(cleanedPrompt) {
 		clipImg, err := r.ResolveClipboard()
-		if err == nil {
-			images = append(images, *clipImg)
-			cleanedPrompt = reAtClip.ReplaceAllString(cleanedPrompt, "")
-		} else {
-			return "", nil, fmt.Errorf("resolve clipboard: %w", err)
+		if err == nil && clipImg != nil {
+			addImage(clipImg)
+		}
+		// Do not fail the whole request if clipboard is empty or fails.
+		// Strip the isolated token and proceed with prompt text.
+		for reAtClip.MatchString(cleanedPrompt) {
+			cleanedPrompt = reAtClip.ReplaceAllString(cleanedPrompt, " ")
 		}
 	}
 
 	// 2. Extract @file paths from prompt
-	cleanedPrompt = reImgPath.ReplaceAllStringFunc(cleanedPrompt, func(match string) string {
-		sub := reImgPath.FindStringSubmatch(match)
-		if len(sub) <= 1 {
-			return match
-		}
-		p := sub[1]
-		target := p
-		if !filepath.IsAbs(target) && r.WorkDir != "" {
-			target = filepath.Join(r.WorkDir, target)
-		}
-
-		info, err := os.Stat(target)
-		if err != nil || info.IsDir() {
-			// File does not exist on disk or is a directory:
-			// Do not return error, leave token as ordinary user text.
-			return match
-		}
-
-		if !seenPaths[p] {
-			seenPaths[p] = true
-			img, err := r.ResolveFile(p)
-			if err != nil {
+	for {
+		matched := false
+		cleanedPrompt = reImgPath.ReplaceAllStringFunc(cleanedPrompt, func(match string) string {
+			sub := reImgPath.FindStringSubmatch(match)
+			if len(sub) <= 1 {
 				return match
 			}
-			images = append(images, *img)
+			p := strings.TrimSpace(sub[1])
+			target := p
+			if !filepath.IsAbs(target) && r.WorkDir != "" {
+				target = filepath.Join(r.WorkDir, target)
+			}
+
+			info, err := os.Stat(target)
+			if err != nil || info.IsDir() {
+				// File does not exist on disk or is a directory:
+				// Leave token as ordinary user text.
+				return match
+			}
+
+			img, err := r.ResolveFile(p)
+			if err == nil && img != nil {
+				addImage(img)
+				matched = true
+				return " "
+			}
+			return match
+		})
+		if !matched {
+			break
 		}
-		return ""
-	})
+	}
 
 	// 3. Process explicit list
 	for _, p := range explicitPaths {
@@ -99,10 +119,9 @@ func (r *ImageResolver) ResolveFromPromptAndList(prompt string, explicitPaths []
 		}
 		if p == "@clipboard" || p == "clipboard://" {
 			clipImg, err := r.ResolveClipboard()
-			if err != nil {
-				return "", nil, fmt.Errorf("resolve clipboard: %w", err)
+			if err == nil && clipImg != nil {
+				addImage(clipImg)
 			}
-			images = append(images, *clipImg)
 			continue
 		}
 		if strings.HasPrefix(p, "data:image/") {
@@ -110,19 +129,16 @@ func (r *ImageResolver) ResolveFromPromptAndList(prompt string, explicitPaths []
 			if err != nil {
 				return "", nil, fmt.Errorf("resolve data uri: %w", err)
 			}
-			images = append(images, *img)
+			addImage(img)
 			continue
 		}
 
 		cleanPath := strings.TrimPrefix(p, "@")
-		if !seenPaths[cleanPath] {
-			seenPaths[cleanPath] = true
-			img, err := r.ResolveFile(cleanPath)
-			if err != nil {
-				return "", nil, fmt.Errorf("resolve image %q: %w", cleanPath, err)
-			}
-			images = append(images, *img)
+		img, err := r.ResolveFile(cleanPath)
+		if err != nil {
+			return "", nil, fmt.Errorf("resolve image %q: %w", cleanPath, err)
 		}
+		addImage(img)
 	}
 
 	// Clean up whitespace in prompt

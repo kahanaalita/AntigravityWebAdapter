@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"testing"
 	"time"
 )
@@ -35,53 +36,79 @@ func TestParseModel(t *testing.T) {
 func TestCanonicalEffort(t *testing.T) {
 	// Test Hydrogen with middle and medium
 	eff, tier, timeout, err := CanonicalEffort(ModelHydrogen4, "middle")
-	if err != nil || eff != EffortMiddle || tier != TierMiddle || timeout != 300*time.Second {
+	if err != nil || eff != EffortMiddle || tier != TierMiddle || timeout != DefaultStreamingTimeout {
 		t.Errorf("CanonicalEffort(Hydrogen, middle) failed: %v, %v, %v, %v", eff, tier, timeout, err)
 	}
 
 	eff, tier, timeout, err = CanonicalEffort(ModelHydrogen4, "medium")
-	if err != nil || eff != EffortMiddle || tier != TierMiddle {
-		t.Errorf("CanonicalEffort cross-alias to Hydrogen failed: %v, %v, %v", eff, tier, err)
+	if err != nil || eff != EffortMiddle || tier != TierMiddle || timeout != DefaultStreamingTimeout {
+		t.Errorf("CanonicalEffort cross-alias to Hydrogen failed: %v, %v, %v, %v", eff, tier, timeout, err)
 	}
 
 	// Test Argon with medium and middle
 	eff, tier, timeout, err = CanonicalEffort(ModelArgon4, "medium")
-	if err != nil || eff != EffortMedium || tier != TierMiddle || timeout != 300*time.Second {
+	if err != nil || eff != EffortMedium || tier != TierMiddle || timeout != DefaultStreamingTimeout {
 		t.Errorf("CanonicalEffort(Argon, medium) failed: %v, %v, %v, %v", eff, tier, timeout, err)
 	}
 
 	eff, tier, timeout, err = CanonicalEffort(ModelArgon4, "middle")
-	if err != nil || eff != EffortMedium || tier != TierMiddle {
-		t.Errorf("CanonicalEffort cross-alias to Argon failed: %v, %v, %v", eff, tier, err)
+	if err != nil || eff != EffortMedium || tier != TierMiddle || timeout != DefaultStreamingTimeout {
+		t.Errorf("CanonicalEffort cross-alias to Argon failed: %v, %v, %v, %v", eff, tier, timeout, err)
 	}
 
 	// Test High
 	eff, tier, timeout, err = CanonicalEffort(ModelHydrogen4, "high")
-	if err != nil || eff != EffortHigh || tier != TierHigh || timeout != 600*time.Second {
+	if err != nil || eff != EffortHigh || tier != TierHigh || timeout != DefaultStreamingTimeout {
 		t.Errorf("CanonicalEffort(Hydrogen, high) failed: %v, %v, %v, %v", eff, tier, timeout, err)
 	}
 
 	// Test Low
 	eff, tier, timeout, err = CanonicalEffort(ModelArgon4, "low")
-	if err != nil || eff != EffortLow || tier != TierLow || timeout != 120*time.Second {
+	if err != nil || eff != EffortLow || tier != TierLow || timeout != DefaultStreamingTimeout {
 		t.Errorf("CanonicalEffort(Argon, low) failed: %v, %v, %v, %v", eff, tier, timeout, err)
 	}
 
 	// Test Defaults
-	eff, tier, _, err = CanonicalEffort(ModelHydrogen4, "")
-	if err != nil || eff != EffortMiddle {
-		t.Errorf("CanonicalEffort default Hydrogen should be middle: %v", eff)
+	eff, tier, defTimeout, err := CanonicalEffort(ModelHydrogen4, "")
+	if err != nil || eff != EffortMiddle || defTimeout != DefaultStreamingTimeout {
+		t.Errorf("CanonicalEffort default Hydrogen should be middle with default timeout: %v, %v", eff, defTimeout)
 	}
 
-	eff, tier, _, err = CanonicalEffort(ModelArgon4, "")
-	if err != nil || eff != EffortMedium {
-		t.Errorf("CanonicalEffort default Argon should be medium: %v", eff)
+	eff, tier, defTimeout, err = CanonicalEffort(ModelArgon4, "")
+	if err != nil || eff != EffortMedium || defTimeout != DefaultStreamingTimeout {
+		t.Errorf("CanonicalEffort default Argon should be medium with default timeout: %v, %v", eff, defTimeout)
 	}
 
 	// Test Invalid
 	_, _, _, err = CanonicalEffort(ModelHydrogen4, "ultra")
 	if err == nil {
 		t.Errorf("Expected error for invalid effort level")
+	}
+}
+
+func TestCanonicalEffort_UnifiedTimeout(t *testing.T) {
+	levels := []string{"low", "middle", "medium", "high", "max"}
+	for _, lvl := range levels {
+		_, _, timeout, err := CanonicalEffort(ModelArgon4, lvl)
+		if err != nil {
+			t.Fatalf("CanonicalEffort failed for %s: %v", lvl, err)
+		}
+		if timeout != DefaultStreamingTimeout {
+			t.Errorf("Level %s: expected timeout %v, got %v", lvl, DefaultStreamingTimeout, timeout)
+		}
+	}
+}
+
+func TestCanonicalEffort_EnvOverride(t *testing.T) {
+	os.Setenv("DEFAULT_STREAMING_TIMEOUT_SECONDS", "900")
+	defer os.Unsetenv("DEFAULT_STREAMING_TIMEOUT_SECONDS")
+
+	_, _, timeout, err := CanonicalEffort(ModelHydrogen4, "high")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if timeout != 900*time.Second {
+		t.Errorf("expected overridden timeout 900s, got %v", timeout)
 	}
 }
 
@@ -102,7 +129,7 @@ func TestResolveModelConfig(t *testing.T) {
 	if cfg.ModelHexID != "hex_argon_pro_2026" {
 		t.Errorf("Expected custom hex ID, got %q", cfg.ModelHexID)
 	}
-	if cfg.Timeout != 600*time.Second {
-		t.Errorf("Expected 600s, got %v", cfg.Timeout)
+	if cfg.Timeout != DefaultStreamingTimeout {
+		t.Errorf("Expected %v, got %v", DefaultStreamingTimeout, cfg.Timeout)
 	}
 }

@@ -94,13 +94,13 @@ func (r *CookieRotator) RotateOnce(ctx context.Context) error {
 
 	// Check for expired session (HTTP 401 or 403)
 	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		log.Printf("[rotator] session expired (HTTP %d), triggering AutoHarvest...", resp.StatusCode)
+		log.Printf("[rotator] WARNING: session expired (HTTP %d). Attempting AutoHarvest without spawning processes...", resp.StatusCode)
 		if harvestErr := r.session.AutoHarvest(ctx); harvestErr != nil {
-			log.Printf("[rotator] AutoHarvest failed after HTTP %d: %v", resp.StatusCode, harvestErr)
-			return fmt.Errorf("session expired (HTTP %d) and AutoHarvest failed: %w", resp.StatusCode, harvestErr)
+			log.Printf("[rotator] WARNING: AutoHarvest failed: %v. Please re-authenticate by starting Chrome with: open -a \"Google Chrome\" --args --remote-debugging-port=9222 and visiting https://gemini.google.com", harvestErr)
+			return fmt.Errorf("session expired (HTTP %d) and cookies could not be harvested: %w", resp.StatusCode, harvestErr)
 		}
 		log.Printf("[rotator] AutoHarvest succeeded after expired session (HTTP %d)", resp.StatusCode)
-		return fmt.Errorf("session expired (HTTP %d); cookies refreshed via AutoHarvest", resp.StatusCode)
+		return nil
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

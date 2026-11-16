@@ -160,34 +160,15 @@ func extractUploadRef(body string, hdr fhttp.Header) string {
 		return ref
 	}
 
-	// 2. Try JSON parse
-	var parsed struct {
-		Resource struct {
-			URL string `json:"url"`
-			ID  string `json:"id"`
-		} `json:"resource"`
-		UploadRef string `json:"upload_ref"`
-		Session   struct {
-			ResourceID string `json:"resourceId"`
-		} `json:"sessionStatus"`
-	}
-
-	if err := json.Unmarshal([]byte(body), &parsed); err == nil {
-		if parsed.Resource.URL != "" {
-			return parsed.Resource.URL
-		}
-		if parsed.Resource.ID != "" {
-			return parsed.Resource.ID
-		}
-		if parsed.UploadRef != "" {
-			return parsed.UploadRef
-		}
-		if parsed.Session.ResourceID != "" {
-			return parsed.Session.ResourceID
+	// 2. Structured JSON
+	var rupioResp map[string]any
+	if err := json.Unmarshal([]byte(body), &rupioResp); err == nil {
+		if token := findAttachmentToken(rupioResp); token != "" {
+			return token
 		}
 	}
 
-	// 3. String contains /contrib_service/ttl_1d/
+	// 3. String contains /contrib_service/
 	if idx := strings.Index(body, "/contrib_service/"); idx >= 0 {
 		sub := body[idx:]
 		end := strings.IndexAny(sub, "\"' \r\n\t,")
@@ -202,5 +183,47 @@ func extractUploadRef(body string, hdr fhttp.Header) string {
 		return trimmed
 	}
 
+	return ""
+}
+
+func findAttachmentToken(node any) string {
+	switch v := node.(type) {
+	case map[string]any:
+		// Priority 1: Direct known keys in current map
+		for _, key := range []string{"photopicker_service_attachment_token", "attachment_token", "upload_ref", "resourceId"} {
+			if val, ok := v[key].(string); ok && val != "" {
+				return val
+			}
+		}
+		// Priority 2: resource.url or resource.id
+		if res, ok := v["resource"].(map[string]any); ok {
+			if u, ok := res["url"].(string); ok && u != "" {
+				return u
+			}
+			if id, ok := res["id"].(string); ok && id != "" {
+				return id
+			}
+		}
+		// Priority 3: any key substring matching
+		for k, val := range v {
+			if strings.Contains(k, "attachment_token") || k == "resourceId" || k == "upload_ref" {
+				if s, ok := val.(string); ok && s != "" {
+					return s
+				}
+			}
+		}
+		// Priority 4: recurse into children
+		for _, val := range v {
+			if token := findAttachmentToken(val); token != "" {
+				return token
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if token := findAttachmentToken(item); token != "" {
+				return token
+			}
+		}
+	}
 	return ""
 }

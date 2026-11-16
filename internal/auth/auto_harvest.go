@@ -30,78 +30,43 @@ func (s *SessionManager) AutoHarvest(ctx context.Context) error {
 }
 
 // AutoHarvestLocked is called when s.mu is already held.
+// It checks whether Chrome CDP is active and harvests cookies, or falls back to Safari.
+// It DOES NOT launch background Chrome processes or empty profile windows.
 func (s *SessionManager) AutoHarvestLocked(ctx context.Context) error {
-	// 1. Try Chrome CDP directly (in case Chrome is already running with remote debugging enabled)
-	if err := s.harvestCookiesFromCDPLocked(ctx); err == nil {
-		log.Printf("[auto_harvest] successfully harvested cookies from active Chrome CDP session")
-		return nil
-	}
-
-	// 2. Try launching Chrome with remote debugging port
 	endpoint := s.cdpURL
 	if endpoint == "" {
 		endpoint = "http://127.0.0.1:9222"
 	}
 
-	chromeRunning := isChromeRunning(ctx)
-	var chromeNotice string
-
-	if chromeRunning {
-		// Chrome is already running without remote debugging port.
-		// Launch an isolated debug instance with a separate profile.
-		isolatedProfile := "/tmp/agy-chrome-cdp-profile"
-		_ = os.MkdirAll(isolatedProfile, 0700)
-
-		log.Printf("[auto_harvest] Google Chrome is already running without debug port. Launching isolated instance with profile: %s", isolatedProfile)
-		_ = exec.CommandContext(ctx, "open", "-n", "-a", "Google Chrome", "--args",
-			fmt.Sprintf("--user-data-dir=%s", isolatedProfile),
-			"--remote-debugging-port=9222",
-			"https://gemini.google.com/app",
-		).Run()
-
-		chromeNotice = "Chrome was running without debug port; launched isolated debug instance (--user-data-dir=/tmp/agy-chrome-cdp-profile). To use your main Chrome profile, please restart Chrome with: open -a \"Google Chrome\" --args --remote-debugging-port=9222"
-	} else {
-		// Chrome is not running, launch with remote debugging port
-		log.Printf("[auto_harvest] launching Google Chrome with --remote-debugging-port=9222")
-		_ = exec.CommandContext(ctx, "open", "-a", "Google Chrome", "--args",
-			"--remote-debugging-port=9222",
-			"https://gemini.google.com/app",
-		).Run()
-		chromeNotice = "Launched Chrome with --remote-debugging-port=9222"
-	}
-
-	// Wait up to 3 seconds for CDP endpoint to become ready
+	// 1. Проверяем, доступен ли уже работающий CDP
 	client := &http.Client{Timeout: 1 * time.Second}
-	deadline := time.Now().Add(3 * time.Second)
-
-	var cdpErr error
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(300 * time.Millisecond):
-		}
-
-		resp, err := client.Get(endpoint + "/json/version")
+	req, reqErr := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(endpoint, "/")+"/json/version", nil)
+	if reqErr == nil {
+		resp, err := client.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
-			resp.Body.Close()
-			if cdpErr = s.harvestCookiesFromCDPLocked(ctx); cdpErr == nil {
-				log.Printf("[auto_harvest] successfully harvested cookies from launched Chrome CDP")
+			_ = resp.Body.Close()
+			if harvestErr := s.harvestCookiesFromCDPLocked(ctx); harvestErr == nil {
+				log.Printf("[auto_harvest] successfully harvested cookies from active Chrome CDP session")
 				return nil
+			} else {
+				log.Printf("[auto_harvest] Chrome CDP is active at %s but cookie harvest failed: %v", endpoint, harvestErr)
 			}
-			break
+		} else if resp != nil {
+			_ = resp.Body.Close()
 		}
 	}
 
-	// 3. Fallback: Safari binary cookies
-	log.Printf("[auto_harvest] Chrome CDP harvest unsuccessful, attempting Safari cookies fallback...")
-	safariErr := s.harvestCookiesFromSafariLocked(ctx)
-	if safariErr == nil {
+	// 2. Попытка Safari fallback
+	log.Printf("[auto_harvest] attempting Safari cookies fallback...")
+	if safariErr := s.harvestCookiesFromSafariLocked(ctx); safariErr == nil {
 		log.Printf("[auto_harvest] successfully harvested cookies from Safari binarycookies")
 		return nil
+	} else {
+		log.Printf("[auto_harvest] Safari cookies fallback failed: %v", safariErr)
 	}
 
-	return fmt.Errorf("unable to harvest session cookies from Chrome CDP or Safari: Chrome (%s; cdp_err=%v); Safari (%w)", chromeNotice, cdpErr, safariErr)
+	// НЕ открываем пустые окна /tmp! Выводим четкую инструкцию для пользователя.
+	return fmt.Errorf("Chrome CDP is not active at %s and Safari cookies inaccessible. To enable automatic harvest, start Chrome with: open -a \"Google Chrome\" --args --remote-debugging-port=9222", endpoint)
 }
 
 // HarvestCookiesFromSafari extracts Google session cookies from Safari binarycookies.

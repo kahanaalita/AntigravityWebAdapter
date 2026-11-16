@@ -193,6 +193,7 @@ type SessionManager struct {
 	httpClient   tls_client.HttpClient
 	wizData      *WizData
 	cdpURL       string
+	baseURL      string
 	chromePath   string
 	lastWizFetch time.Time
 }
@@ -238,7 +239,8 @@ func NewSessionManager(cookiePath, cdpURL string) (*SessionManager, error) {
 
 	dialer := createDialer(os.Getenv("CUSTOM_DNS_RESOLVER"))
 
-	timeoutSeconds := 660
+	// 1260 секунд (21 минута) — 20 минут серверного лимита потока + 60 секунд буфер на сетевые задержки
+	timeoutSeconds := 1260
 	if v := os.Getenv("TLS_CLIENT_TIMEOUT"); v != "" {
 		if sec, err := strconv.Atoi(v); err == nil && sec > 0 {
 			timeoutSeconds = sec
@@ -332,99 +334,133 @@ func (s *SessionManager) GetWizData(ctx context.Context, forceRefresh bool) (*Wi
 }
 
 // RefreshWizData queries https://gemini.google.com/app or Chrome CDP to extract SNlM0e, cfb2h, and FdrFJe.
+// Network requests are performed OUTSIDE s.mu to avoid blocking concurrent callers.
 func (s *SessionManager) RefreshWizData(ctx context.Context) (*WizData, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Try Chrome CDP first if available — it holds live authenticated tokens from browser tab
-	if s.cdpURL != "" {
+	// 1. Try Chrome CDP first if available — it holds live authenticated tokens from browser tab
+	if cdpURL := s.CDPURL(); cdpURL != "" {
 		if wiz, err := s.FetchWizDataViaCDP(ctx); err == nil && wiz != nil && wiz.At != "" {
+			s.mu.Lock()
 			s.wizData = wiz
 			s.lastWizFetch = time.Now()
+			s.mu.Unlock()
 			return wiz, nil
 		}
 	}
 
-	req, err := fhttp.NewRequestWithContext(ctx, "GET", "https://gemini.google.com/app", nil)
+	// 2. Fetch gemini app page via HTTP client (outside s.mu.Lock)
+	wiz, err := s.fetchWizDataViaHTTP(ctx)
 	if err != nil {
+		// If cookies expired or redirected to accounts.google.com, attempt AutoHarvest
+		if harvestErr := s.AutoHarvest(ctx); harvestErr == nil {
+			return s.refreshWizDataWithNewCookies(ctx)
+		}
 		return nil, err
 	}
 
-	cookieHdr := s.store.CookieHeader()
-	if cookieHdr != "" {
-		req.Header.Set("Cookie", cookieHdr)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9,ru;q=0.8")
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-User", "?1")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch gemini app: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read gemini response body: %w", err)
-	}
-	html := string(bodyBytes)
-
-	// Update any cookies returned in response
-	for _, c := range resp.Cookies() {
-		s.store.Set(c.Name, c.Value)
-	}
-	_ = s.store.Save()
-
-	wiz, err := ParseWizGlobalData(html)
-	if err != nil || resp.StatusCode == 302 || resp.StatusCode == 401 {
-		// If cookies expired or redirected to accounts.google.com, attempt AutoHarvest
-		if harvestErr := s.AutoHarvestLocked(ctx); harvestErr == nil {
-			// Retry with freshly harvested cookies
-			return s.refreshWizDataWithNewCookies(ctx)
-		}
-		return nil, fmt.Errorf("parse WIZ_global_data (status %d): %w", resp.StatusCode, err)
-	}
-
+	s.mu.Lock()
 	s.wizData = wiz
 	s.lastWizFetch = time.Now()
+	s.mu.Unlock()
+
 	return wiz, nil
 }
 
 func (s *SessionManager) refreshWizDataWithNewCookies(ctx context.Context) (*WizData, error) {
-	req, err := fhttp.NewRequestWithContext(ctx, "GET", "https://gemini.google.com/app", nil)
+	wiz, err := s.fetchWizDataViaHTTP(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("retry fetch WIZ_global_data: %w", err)
 	}
 
-	cookieHdr := s.store.CookieHeader()
-	if cookieHdr != "" {
-		req.Header.Set("Cookie", cookieHdr)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("retry fetch gemini app: %w", err)
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("retry read body: %w", err)
-	}
-
-	wiz, err := ParseWizGlobalData(string(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("retry parse WIZ_global_data: %w", err)
-	}
-
+	s.mu.Lock()
 	s.wizData = wiz
 	s.lastWizFetch = time.Now()
+	s.mu.Unlock()
+
 	return wiz, nil
+}
+
+func (s *SessionManager) fetchWizDataViaHTTP(ctx context.Context) (*WizData, error) {
+	baseURL := s.baseURL
+	if baseURL == "" {
+		baseURL = "https://gemini.google.com"
+	}
+	currentURL := baseURL + "/app"
+	maxRedirects := 5
+
+	for redirectCount := 0; redirectCount < maxRedirects; redirectCount++ {
+		req, err := fhttp.NewRequestWithContext(ctx, "GET", currentURL, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		cookieHdr := s.store.CookieHeader()
+		if cookieHdr != "" {
+			req.Header.Set("Cookie", cookieHdr)
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9,ru;q=0.8")
+		req.Header.Set("Sec-Fetch-Dest", "document")
+		req.Header.Set("Sec-Fetch-Mode", "navigate")
+		req.Header.Set("Sec-Fetch-Site", "none")
+		req.Header.Set("Sec-Fetch-User", "?1")
+
+		resp, err := s.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("fetch gemini app: %w", err)
+		}
+
+		// Update cookies from response
+		var cookiesUpdated bool
+		for _, c := range resp.Cookies() {
+			if c.Value != "" {
+				s.store.Set(c.Name, c.Value)
+				cookiesUpdated = true
+			}
+		}
+		if cookiesUpdated {
+			_ = s.store.Save()
+		}
+
+		// Handle HTTP redirects (301, 302, 303, 307, 308)
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			loc := resp.Header.Get("Location")
+			_ = resp.Body.Close()
+
+			if strings.Contains(loc, "accounts.google.com") || strings.Contains(loc, "ServiceLogin") {
+				return nil, errors.New("gemini session expired: redirected to accounts.google.com")
+			}
+
+			if loc == "" {
+				return nil, fmt.Errorf("redirect status %d without Location header", resp.StatusCode)
+			}
+
+			if strings.HasPrefix(loc, "/") {
+				currentURL = baseURL + loc
+			} else {
+				currentURL = loc
+			}
+			continue
+		}
+
+		if resp.StatusCode == 401 || resp.StatusCode == 403 {
+			_ = resp.Body.Close()
+			return nil, fmt.Errorf("gemini authentication failed with status %d", resp.StatusCode)
+		}
+
+		bodyBytes, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read gemini response body: %w", err)
+		}
+
+		wiz, err := ParseWizGlobalData(string(bodyBytes))
+		if err != nil {
+			return nil, fmt.Errorf("parse WIZ_global_data (status %d): %w", resp.StatusCode, err)
+		}
+
+		return wiz, nil
+	}
+
+	return nil, errors.New("too many redirects fetching gemini app")
 }

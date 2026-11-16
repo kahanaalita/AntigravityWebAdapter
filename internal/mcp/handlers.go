@@ -108,10 +108,10 @@ func (h *ServerHandler) handleUnifiedAsk(ctx context.Context, req mcp.CallToolRe
 	return h.executeAsk(ctx, model, effort, args)
 }
 
-func (h *ServerHandler) executeAsk(ctx context.Context, rawModel, rawEffort string, args map[string]any) (*mcp.CallToolResult, error) {
+func (h *ServerHandler) prepareAskRequest(rawModel, rawEffort string, args map[string]any) (*geminiweb.StreamGenerateRequest, []media.ResolvedImage, error) {
 	rawPrompt, _ := args["prompt"].(string)
 	if strings.TrimSpace(rawPrompt) == "" {
-		return mcp.NewToolResultError("prompt cannot be empty"), nil
+		return nil, nil, fmt.Errorf("prompt cannot be empty")
 	}
 
 	convID, _ := args["conversation_id"].(string)
@@ -140,13 +140,11 @@ func (h *ServerHandler) executeAsk(ctx context.Context, rawModel, rawEffort stri
 		}
 	}
 
-	// Check if prompt itself begins with /hydrogen or /argon
+	// Route slash command only if the prompt begins with '/'
 	slashRes, err := ParseSlashCommand(rawPrompt, "", "")
 	if err == nil && slashRes.Model != "" {
-		if rawModel == "" {
-			rawModel = string(slashRes.Model)
-		}
-		if rawEffort == "" && slashRes.Effort != "" {
+		rawModel = string(slashRes.Model)
+		if slashRes.Effort != "" {
 			rawEffort = string(slashRes.Effort)
 		}
 		rawPrompt = slashRes.Prompt
@@ -158,35 +156,40 @@ func (h *ServerHandler) executeAsk(ctx context.Context, rawModel, rawEffort stri
 
 	modelCfg, err := config.ResolveModelConfig(rawModel, rawEffort, h.customHexIDs)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid model or effort: %v", err)), nil
+		return nil, nil, fmt.Errorf("invalid model or effort: %w", err)
 	}
 
 	// Resolve media images from prompt text (@path, @clipboard) and images array
 	cleanedPrompt, resolvedImages, err := h.resolver.ResolveFromPromptAndList(rawPrompt, explicitImages)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("resolve images: %v", err)), nil
+		return nil, nil, fmt.Errorf("resolve images: %w", err)
+	}
+
+	return &geminiweb.StreamGenerateRequest{
+		ModelConfig:    modelCfg,
+		Prompt:         cleanedPrompt,
+		ConversationID: convID,
+		CustomTimeout:  customTimeout,
+	}, resolvedImages, nil
+}
+
+func (h *ServerHandler) executeAsk(ctx context.Context, rawModel, rawEffort string, args map[string]any) (*mcp.CallToolResult, error) {
+	genReq, resolvedImages, err := h.prepareAskRequest(rawModel, rawEffort, args)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
 	}
 
 	// Upload images via Scotty Resumable Upload
-	var attachments []geminiweb.ScottyAttachment
 	if len(resolvedImages) > 0 {
 		attList, err := h.scotty.UploadImages(ctx, resolvedImages)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("scotty image upload: %v", err)), nil
 		}
-		attachments = attList
+		genReq.Attachments = attList
 	}
 
 	// Execute Generation
-	genReq := geminiweb.StreamGenerateRequest{
-		ModelConfig:    modelCfg,
-		Prompt:         cleanedPrompt,
-		Attachments:    attachments,
-		ConversationID: convID,
-		CustomTimeout:  customTimeout,
-	}
-
-	resp, err := h.client.Generate(ctx, genReq)
+	resp, err := h.client.Generate(ctx, *genReq)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("gemini web rpc generation: %v", err)), nil
 	}

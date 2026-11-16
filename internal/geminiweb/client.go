@@ -46,11 +46,11 @@ func (c *Client) SaveConversationContext(convID string, ctx ConversationContext)
 
 // StreamGenerateRequest holds all parameters for a generation call.
 type StreamGenerateRequest struct {
-	ModelConfig     *config.ModelConfig
-	Prompt          string
-	Attachments     []ScottyAttachment
-	ConversationID  string
-	CustomTimeout   time.Duration
+	ModelConfig    *config.ModelConfig
+	Prompt         string
+	Attachments    []ScottyAttachment
+	ConversationID string
+	CustomTimeout  time.Duration
 }
 
 // Generate executes the RPC call and returns the parsed response.
@@ -170,10 +170,15 @@ func (c *Client) doGenerate(ctx context.Context, req StreamGenerateRequest, isRe
 	}
 
 	// Update cookie store if response returned new cookies
+	var cookiesUpdated bool
 	for _, cookie := range httpResp.Cookies() {
 		if cookie.Value != "" {
 			c.session.Store().Set(cookie.Name, cookie.Value)
+			cookiesUpdated = true
 		}
+	}
+	if cookiesUpdated {
+		_ = c.session.Store().Save()
 	}
 
 	// Store conversation context for continuation
