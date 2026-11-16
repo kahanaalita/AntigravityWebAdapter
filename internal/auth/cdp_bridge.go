@@ -9,8 +9,17 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// BridgeGenerateParams holds parameters for executing generation via CDP bridge.
+type BridgeGenerateParams struct {
+	Body            string
+	Bl              string
+	Sid             string
+	ExtensionHeader string
+	Timeout         time.Duration
+}
+
 // BridgeGenerate executes the Gemini Web RPC directly in the authenticated browser context via CDP Runtime.evaluate.
-func (s *SessionManager) BridgeGenerate(ctx context.Context, body, bl, sid string) (string, error) {
+func (s *SessionManager) BridgeGenerate(ctx context.Context, params BridgeGenerateParams) (string, error) {
 	endpoint := s.cdpURL
 	if endpoint == "" {
 		endpoint = "http://127.0.0.1:9222"
@@ -28,18 +37,37 @@ func (s *SessionManager) BridgeGenerate(ctx context.Context, body, bl, sid strin
 	}
 	defer conn.Close()
 
+	stopWatcher := make(chan struct{})
+	defer close(stopWatcher)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatcher:
+		}
+	}()
+
 	jsExpr := fmt.Sprintf(`(async () => {
 		const at = window.WIZ_global_data?.SNlM0e || '';
 		const bl = %q || window.WIZ_global_data?.cfb2h || '';
 		const sid = %q || window.WIZ_global_data?.FdrFJe || '';
-		const url = 'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=' + bl + '&rt=c&f.sid=' + sid;
+		const extHdr = %q;
+		const reqID = Math.floor(100000 + Math.random() * 900000);
+		const url = 'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=' + bl + '&_reqid=' + reqID + '&rt=c&f.sid=' + sid;
+		const headers = {
+			'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+			'x-goog-ext-525001261-jspb': extHdr
+		};
+		if (!extHdr) {
+			delete headers['x-goog-ext-525001261-jspb'];
+		}
 		const r = await fetch(url, {
 			method: 'POST',
-			headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
+			headers: headers,
 			body: %q
 		});
 		return await r.text();
-	})()`, bl, sid, body)
+	})()`, params.Bl, params.Sid, params.ExtensionHeader, params.Body)
 
 	req := cdpEvalRequest{
 		ID:     201,
@@ -52,13 +80,30 @@ func (s *SessionManager) BridgeGenerate(ctx context.Context, body, bl, sid strin
 	}
 
 	if err := conn.WriteJSON(req); err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("context canceled: %w", ctx.Err())
+		}
 		return "", fmt.Errorf("write Runtime.evaluate: %w", err)
 	}
 
-	_ = conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+	timeout := params.Timeout
+	if timeout <= 0 {
+		timeout = 120 * time.Second
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(timeout + 15*time.Second))
+
 	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+
 		var resp cdpEvalResponse
 		if err := conn.ReadJSON(&resp); err != nil {
+			if ctx.Err() != nil {
+				return "", fmt.Errorf("context canceled: %w", ctx.Err())
+			}
 			return "", fmt.Errorf("read cdp eval response: %w", err)
 		}
 		if resp.ID == 201 {

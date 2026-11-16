@@ -92,3 +92,61 @@ func TestExtractUploadRef(t *testing.T) {
 		t.Errorf("Expected /contrib_service/ttl_1d/header_ref_888, got %q", ref)
 	}
 }
+
+func TestResolveFromPrompt_NonExistentFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	resolver := NewImageResolver(tmpDir)
+
+	prompt := "Please check @nonexistent_diagram.png and contact user@domain.png for info"
+	cleaned, imgs, err := resolver.ResolveFromPromptAndList(prompt, nil)
+	if err != nil {
+		t.Fatalf("Expected no error for nonexistent file in prompt, got: %v", err)
+	}
+	if len(imgs) != 0 {
+		t.Fatalf("Expected 0 images, got %d", len(imgs))
+	}
+	if !strings.Contains(cleaned, "@nonexistent_diagram.png") {
+		t.Errorf("Prompt should preserve nonexistent token, got: %q", cleaned)
+	}
+	if !strings.Contains(cleaned, "user@domain.png") {
+		t.Errorf("Prompt should preserve user@domain.png, got: %q", cleaned)
+	}
+}
+
+func TestResolveFromPrompt_MixedExistentAndNonExistent(t *testing.T) {
+	tmpDir := t.TempDir()
+	imgPath := filepath.Join(tmpDir, "real.png")
+	pngData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	if err := os.WriteFile(imgPath, pngData, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := NewImageResolver(tmpDir)
+	prompt := "Compare @real.png with @missing.png please"
+	cleaned, imgs, err := resolver.ResolveFromPromptAndList(prompt, nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(imgs) != 1 {
+		t.Fatalf("Expected 1 image, got %d", len(imgs))
+	}
+	if imgs[0].FileName != "real.png" {
+		t.Errorf("Expected real.png, got %s", imgs[0].FileName)
+	}
+	if strings.Contains(cleaned, "@real.png") {
+		t.Errorf("Cleaned prompt should not contain @real.png: %q", cleaned)
+	}
+	if !strings.Contains(cleaned, "@missing.png") {
+		t.Errorf("Cleaned prompt must retain @missing.png: %q", cleaned)
+	}
+}
+
+func TestResolveExplicit_NonExistentFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	resolver := NewImageResolver(tmpDir)
+
+	_, _, err := resolver.ResolveFromPromptAndList("some prompt", []string{"definitely_missing.png"})
+	if err == nil {
+		t.Fatalf("Expected error for explicitly requested nonexistent file, got nil")
+	}
+}

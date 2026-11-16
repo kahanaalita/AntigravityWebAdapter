@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	magicPrefix = []byte(")]}'\n")
-	reThoughtTag = regexp.MustCompile(`(?s)<thought>(.*?)</thought>`)
+	magicPrefix    = []byte(")]}'\n")
+	reThoughtTag   = regexp.MustCompile(`(?is)<thought(?:\s+[^>]*)?>(.*?)</thought>`)
+	reThoughtBlock = regexp.MustCompile(`(?is):::thought\s*(.*?)(?:\n\s*:::|\s+:::)(?:[\r\n\s]+|$)`)
 )
 
 // ParsedResponse holds the consolidated output from StreamGenerate.
@@ -87,18 +88,63 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 		}
 	}
 
-	// Final extraction: check if text has embedded <thought>...</thought> tags
+	// Final extraction: check if text has embedded :::thought ... ::: blocks or <thought>...</thought> tags
 	fullText := textBuilder.String()
+
+	if matches := reThoughtBlock.FindAllStringSubmatch(fullText, -1); len(matches) > 0 {
+		for _, m := range matches {
+			if len(m) > 1 {
+				t := strings.TrimSpace(m[1])
+				if t != "" {
+					if thoughtBuilder.Len() > 0 {
+						thoughtBuilder.WriteString("\n\n")
+					}
+					thoughtBuilder.WriteString(t)
+				}
+			}
+		}
+		fullText = reThoughtBlock.ReplaceAllString(fullText, "")
+	}
+
 	if matches := reThoughtTag.FindAllStringSubmatch(fullText, -1); len(matches) > 0 {
 		for _, m := range matches {
 			if len(m) > 1 {
-				if thoughtBuilder.Len() > 0 {
-					thoughtBuilder.WriteString("\n\n")
+				t := strings.TrimSpace(m[1])
+				if t != "" {
+					if thoughtBuilder.Len() > 0 {
+						thoughtBuilder.WriteString("\n\n")
+					}
+					thoughtBuilder.WriteString(t)
 				}
-				thoughtBuilder.WriteString(strings.TrimSpace(m[1]))
 			}
 		}
 		fullText = reThoughtTag.ReplaceAllString(fullText, "")
+	}
+
+	// Handle unclosed :::thought block if present
+	if strings.Contains(fullText, ":::thought") && !reThoughtBlock.MatchString(fullText) {
+		idx := strings.Index(fullText, ":::thought")
+		thoughtPart := strings.TrimSpace(strings.TrimPrefix(fullText[idx:], ":::thought"))
+		if thoughtPart != "" {
+			if thoughtBuilder.Len() > 0 {
+				thoughtBuilder.WriteString("\n\n")
+			}
+			thoughtBuilder.WriteString(thoughtPart)
+		}
+		fullText = strings.TrimSpace(fullText[:idx])
+	}
+
+	// Handle unclosed <thought> tag if present
+	if strings.Contains(fullText, "<thought>") && !reThoughtTag.MatchString(fullText) {
+		idx := strings.Index(fullText, "<thought>")
+		thoughtPart := strings.TrimSpace(strings.TrimPrefix(fullText[idx:], "<thought>"))
+		if thoughtPart != "" {
+			if thoughtBuilder.Len() > 0 {
+				thoughtBuilder.WriteString("\n\n")
+			}
+			thoughtBuilder.WriteString(thoughtPart)
+		}
+		fullText = strings.TrimSpace(fullText[:idx])
 	}
 
 	resp.Thought = strings.TrimSpace(thoughtBuilder.String())
@@ -209,31 +255,61 @@ func inspectThinkingTrace(val any, thoughtB *strings.Builder) {
 	switch v := val.(type) {
 	case string:
 		// If string contains thinking indicator
-		if strings.HasPrefix(strings.TrimSpace(v), "Thinking Process:") || strings.Contains(v, "Thinking Trace") {
+		trimmed := strings.TrimSpace(v)
+		if strings.HasPrefix(trimmed, "Thinking Process:") || strings.Contains(v, "Thinking Trace") {
 			if thoughtB.Len() > 0 {
 				thoughtB.WriteString("\n\n")
 			}
 			thoughtB.WriteString(v)
+		} else if strings.HasPrefix(trimmed, ":::thought") && strings.HasSuffix(trimmed, ":::") {
+			content := strings.TrimPrefix(trimmed, ":::thought")
+			content = strings.TrimSuffix(content, ":::")
+			content = strings.TrimSpace(content)
+			if content != "" {
+				if thoughtB.Len() > 0 {
+					thoughtB.WriteString("\n\n")
+				}
+				thoughtB.WriteString(content)
+			}
+		} else if strings.HasPrefix(trimmed, "<thought>") && strings.HasSuffix(trimmed, "</thought>") {
+			content := strings.TrimPrefix(trimmed, "<thought>")
+			content = strings.TrimSuffix(content, "</thought>")
+			content = strings.TrimSpace(content)
+			if content != "" {
+				if thoughtB.Len() > 0 {
+					thoughtB.WriteString("\n\n")
+				}
+				thoughtB.WriteString(content)
+			}
 		}
 	case []any:
 		for _, item := range v {
 			inspectThinkingTrace(item, thoughtB)
 		}
 	case map[string]any:
-		if thoughtVal, exists := v["thought"]; exists {
-			if tStr, ok := thoughtVal.(string); ok && tStr != "" {
-				if thoughtB.Len() > 0 {
-					thoughtB.WriteString("\n\n")
+		found := false
+		for _, key := range []string{"thought", "thinking", "reasoning", "thought_trace"} {
+			if thoughtVal, exists := v[key]; exists {
+				if tStr, ok := thoughtVal.(string); ok && tStr != "" {
+					if thoughtB.Len() > 0 {
+						thoughtB.WriteString("\n\n")
+					}
+					thoughtB.WriteString(tStr)
+					found = true
+					break
+				} else {
+					inspectThinkingTrace(thoughtVal, thoughtB)
+					found = true
 				}
-				thoughtB.WriteString(tStr)
 			}
 		}
-		if thoughtVal, exists := v["thinking"]; exists {
-			if tStr, ok := thoughtVal.(string); ok && tStr != "" {
-				if thoughtB.Len() > 0 {
-					thoughtB.WriteString("\n\n")
+		if !found {
+			for _, val := range v {
+				if _, isMap := val.(map[string]any); isMap {
+					inspectThinkingTrace(val, thoughtB)
+				} else if _, isArr := val.([]any); isArr {
+					inspectThinkingTrace(val, thoughtB)
 				}
-				thoughtB.WriteString(tStr)
 			}
 		}
 	}

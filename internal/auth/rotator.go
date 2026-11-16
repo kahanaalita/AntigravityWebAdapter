@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"time"
 
 	fhttp "github.com/bogdanfinn/fhttp"
@@ -42,7 +43,9 @@ func (r *CookieRotator) Start(ctx context.Context) {
 			case <-r.stopCh:
 				return
 			case <-ticker.C:
-				_ = r.RotateOnce(ctx)
+				if err := r.RotateOnce(ctx); err != nil {
+					log.Printf("[rotator] periodic cookie rotation error: %v", err)
+				}
 			}
 		}
 	}()
@@ -62,6 +65,7 @@ func (r *CookieRotator) RotateOnce(ctx context.Context) error {
 	store := r.session.Store()
 	cookieHdr := store.CookieHeader()
 	if cookieHdr == "" {
+		log.Printf("[rotator] cookie store is empty, skipping rotation")
 		return nil
 	}
 
@@ -70,6 +74,7 @@ func (r *CookieRotator) RotateOnce(ctx context.Context) error {
 
 	req, err := fhttp.NewRequestWithContext(ctx, "POST", "https://accounts.google.com/RotateCookies", bytes.NewReader(body))
 	if err != nil {
+		log.Printf("[rotator] failed to create rotate request: %v", err)
 		return fmt.Errorf("create rotate request: %w", err)
 	}
 
@@ -81,10 +86,27 @@ func (r *CookieRotator) RotateOnce(ctx context.Context) error {
 
 	resp, err := r.session.TLSClient().Do(req)
 	if err != nil {
+		log.Printf("[rotator] network error executing rotate request: %v", err)
 		return fmt.Errorf("execute rotate request: %w", err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, resp.Body)
+
+	// Check for expired session (HTTP 401 or 403)
+	if resp.StatusCode == 401 || resp.StatusCode == 403 {
+		log.Printf("[rotator] session expired (HTTP %d), triggering AutoHarvest...", resp.StatusCode)
+		if harvestErr := r.session.AutoHarvest(ctx); harvestErr != nil {
+			log.Printf("[rotator] AutoHarvest failed after HTTP %d: %v", resp.StatusCode, harvestErr)
+			return fmt.Errorf("session expired (HTTP %d) and AutoHarvest failed: %w", resp.StatusCode, harvestErr)
+		}
+		log.Printf("[rotator] AutoHarvest succeeded after expired session (HTTP %d)", resp.StatusCode)
+		return fmt.Errorf("session expired (HTTP %d); cookies refreshed via AutoHarvest", resp.StatusCode)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[rotator] unexpected status code from RotateCookies: %d", resp.StatusCode)
+		return fmt.Errorf("unexpected status code from RotateCookies: %d", resp.StatusCode)
+	}
 
 	var updated bool
 	for _, c := range resp.Cookies() {
@@ -95,7 +117,13 @@ func (r *CookieRotator) RotateOnce(ctx context.Context) error {
 	}
 
 	if updated {
-		_ = store.Save()
+		if err := store.Save(); err != nil {
+			log.Printf("[rotator] failed to save rotated cookies: %v", err)
+			return fmt.Errorf("save rotated cookies: %w", err)
+		}
+		log.Printf("[rotator] cookies successfully rotated and updated")
+	} else {
+		log.Printf("[rotator] cookie rotation check succeeded (no new cookies in response)")
 	}
 
 	return nil

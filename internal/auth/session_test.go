@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseWizGlobalData(t *testing.T) {
@@ -100,5 +101,70 @@ func TestCookieStore_Formats(t *testing.T) {
 	hdr := store4.CookieHeader()
 	if !strings.Contains(hdr, "A=1") || !strings.Contains(hdr, "B=2") {
 		t.Errorf("CookieHeader missing entries: %q", hdr)
+	}
+}
+
+func TestCreateDialer_Default(t *testing.T) {
+	d := createDialer("")
+	if d.Resolver != nil {
+		t.Errorf("expected default dialer to have nil Resolver, got %v", d.Resolver)
+	}
+	if d.Timeout != 30*time.Second {
+		t.Errorf("expected 30s timeout, got %v", d.Timeout)
+	}
+}
+
+func TestCreateDialer_CustomDNS(t *testing.T) {
+	d1 := createDialer("1.1.1.1")
+	if d1.Resolver == nil {
+		t.Fatalf("expected custom resolver, got nil")
+	}
+	if !d1.Resolver.PreferGo {
+		t.Errorf("expected PreferGo = true")
+	}
+
+	d2 := createDialer("8.8.8.8:5353")
+	if d2.Resolver == nil {
+		t.Fatalf("expected custom resolver with port, got nil")
+	}
+}
+
+func TestNewSessionManager_Init(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookies.json")
+	sm, err := NewSessionManager(cookieFile, "http://127.0.0.1:9222")
+	if err != nil {
+		t.Fatalf("NewSessionManager failed: %v", err)
+	}
+	if sm == nil {
+		t.Fatal("expected non-nil SessionManager")
+	}
+	if sm.CDPURL() != "http://127.0.0.1:9222" {
+		t.Errorf("expected cdpURL, got %s", sm.CDPURL())
+	}
+	if sm.Store() == nil {
+		t.Errorf("expected non-nil store")
+	}
+	if sm.TLSClient() == nil {
+		t.Errorf("expected non-nil tls client")
+	}
+}
+
+func TestIsChromeRunning(t *testing.T) {
+	// Should execute without panicking
+	_ = isChromeRunning(t.Context())
+}
+
+func TestCookieRotator_EmptyStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "empty_cookies.json")
+	sm, err := NewSessionManager(cookieFile, "")
+	if err != nil {
+		t.Fatalf("NewSessionManager failed: %v", err)
+	}
+
+	rotator := NewCookieRotator(sm, 5*time.Minute)
+	if err := rotator.RotateOnce(t.Context()); err != nil {
+		t.Errorf("expected nil error for empty store, got %v", err)
 	}
 }

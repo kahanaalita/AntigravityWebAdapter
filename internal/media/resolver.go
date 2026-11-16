@@ -55,26 +55,41 @@ func (r *ImageResolver) ResolveFromPromptAndList(prompt string, explicitPaths []
 		clipImg, err := r.ResolveClipboard()
 		if err == nil {
 			images = append(images, *clipImg)
+			cleanedPrompt = reAtClip.ReplaceAllString(cleanedPrompt, "")
+		} else {
+			return "", nil, fmt.Errorf("resolve clipboard: %w", err)
 		}
-		cleanedPrompt = reAtClip.ReplaceAllString(cleanedPrompt, "")
 	}
 
 	// 2. Extract @file paths from prompt
-	matches := reImgPath.FindAllStringSubmatch(prompt, -1)
-	for _, m := range matches {
-		if len(m) > 1 {
-			p := m[1]
-			if !seenPaths[p] {
-				seenPaths[p] = true
-				img, err := r.ResolveFile(p)
-				if err != nil {
-					return "", nil, fmt.Errorf("resolve image %q from prompt: %w", p, err)
-				}
-				images = append(images, *img)
-			}
+	cleanedPrompt = reImgPath.ReplaceAllStringFunc(cleanedPrompt, func(match string) string {
+		sub := reImgPath.FindStringSubmatch(match)
+		if len(sub) <= 1 {
+			return match
 		}
-	}
-	cleanedPrompt = reImgPath.ReplaceAllString(cleanedPrompt, "")
+		p := sub[1]
+		target := p
+		if !filepath.IsAbs(target) && r.WorkDir != "" {
+			target = filepath.Join(r.WorkDir, target)
+		}
+
+		info, err := os.Stat(target)
+		if err != nil || info.IsDir() {
+			// File does not exist on disk or is a directory:
+			// Do not return error, leave token as ordinary user text.
+			return match
+		}
+
+		if !seenPaths[p] {
+			seenPaths[p] = true
+			img, err := r.ResolveFile(p)
+			if err != nil {
+				return match
+			}
+			images = append(images, *img)
+		}
+		return ""
+	})
 
 	// 3. Process explicit list
 	for _, p := range explicitPaths {

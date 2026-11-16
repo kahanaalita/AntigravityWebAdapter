@@ -49,9 +49,14 @@ func main() {
 		defaultCDP = "http://127.0.0.1:9222"
 	}
 
+	defaultWorkDir := os.Getenv("ANTIGRAVITY_WORKSPACE_ROOT")
+	if defaultWorkDir == "" {
+		defaultWorkDir = os.Getenv("WORKSPACE_DIR")
+	}
+
 	flag.StringVar(&cookieStorePath, "cookie-store", defaultCookiePath, "Path to cookies.json storage")
 	flag.StringVar(&cdpURL, "cdp-url", defaultCDP, "Chrome DevTools Protocol URL for session harvest")
-	flag.StringVar(&workDir, "work-dir", "", "Working directory for relative path resolution")
+	flag.StringVar(&workDir, "work-dir", defaultWorkDir, "Working directory for relative path resolution")
 	flag.StringVar(&defaultHydrogenEffort, "default-hydrogen-effort", "middle", "Default effort for Hydrogen 4 (low|middle|high)")
 	flag.StringVar(&defaultArgonEffort, "default-argon-effort", "medium", "Default effort for Argon 4 (low|medium|high)")
 	flag.StringVar(&hydrogenHexID, "hydrogen-model-id", "hydrogen-4", "Model ID / Hex ID for Hydrogen 4")
@@ -63,6 +68,14 @@ func main() {
 	flag.StringVar(&modelArg, "model", "hydrogen-4", "Model for direct prompt execution")
 	flag.StringVar(&effortArg, "effort", "middle", "Effort for direct prompt execution")
 	flag.Parse()
+
+	if workDir == "" {
+		if envRoot := os.Getenv("ANTIGRAVITY_WORKSPACE_ROOT"); envRoot != "" {
+			workDir = envRoot
+		} else if envDir := os.Getenv("WORKSPACE_DIR"); envDir != "" {
+			workDir = envDir
+		}
+	}
 
 	if installCommands {
 		if err := runInstallCommands(workDir); err != nil {

@@ -95,9 +95,22 @@ func (c *Client) doGenerate(ctx context.Context, req StreamGenerateRequest, isRe
 		return nil, fmt.Errorf("build request payload: %w", err)
 	}
 
+	// Model & Effort Extension Header
+	extHeader := BuildExtensionHeader(req.ModelConfig.ModelHexID, req.ModelConfig.EffortTier)
+
 	// If Chrome CDP is active, execute directly in browser context (bypasses cookie rotation/fingerprint 401s)
 	if c.session.CDPURL() != "" {
-		respBody, bridgeErr := c.session.BridgeGenerate(ctx, body, wiz.Bl, wiz.Sid)
+		timeout := req.ModelConfig.Timeout
+		if req.CustomTimeout > 0 {
+			timeout = req.CustomTimeout
+		}
+		respBody, bridgeErr := c.session.BridgeGenerate(ctx, auth.BridgeGenerateParams{
+			Body:            body,
+			Bl:              wiz.Bl,
+			Sid:             wiz.Sid,
+			ExtensionHeader: extHeader,
+			Timeout:         timeout,
+		})
 		if bridgeErr == nil {
 			parsed, parseErr := ParseStream(strings.NewReader(respBody))
 			if parseErr == nil && parsed != nil {
@@ -138,9 +151,6 @@ func (c *Client) doGenerate(ctx context.Context, req StreamGenerateRequest, isRe
 	}
 	httpReq.Header.Set("Referer", reqReferer)
 	httpReq.Header.Set("X-Same-Domain", "1")
-
-	// Model & Effort Extension Header
-	extHeader := BuildExtensionHeader(req.ModelConfig.ModelHexID, req.ModelConfig.EffortTier)
 	httpReq.Header.Set("x-goog-ext-525001261-jspb", extHeader)
 
 	httpResp, err := c.session.TLSClient().Do(httpReq)

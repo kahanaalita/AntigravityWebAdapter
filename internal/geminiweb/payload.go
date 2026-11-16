@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 
 	"agy-gemini-web-mcp/internal/config"
 )
@@ -83,11 +84,16 @@ func BuildStreamGenerateBody(prompt string, attachments []ScottyAttachment, conv
 	// 4. Reasoning effort config slot
 	effortSlot := []any{nil, int(tier)}
 
+	locale := os.Getenv("GEMINI_LOCALE")
+	if locale == "" {
+		locale = "ru"
+	}
+
 	// 5. Root f.req inner structure
-	// [ promptContent, ["ru"], convTuple, null, null, null, effortSlot ]
+	// [ promptContent, [locale], convTuple, null, null, null, effortSlot ]
 	reqPayload := []any{
 		promptContent,
-		[]string{"ru"},
+		[]string{locale},
 		convTuple,
 		nil,
 		nil,

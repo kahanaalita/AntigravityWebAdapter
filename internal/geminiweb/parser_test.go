@@ -64,6 +64,34 @@ func TestBuildStreamGenerateBody(t *testing.T) {
 	}
 }
 
+func TestBuildStreamGenerateBody_Locale(t *testing.T) {
+	conv := ConversationContext{}
+
+	// Default locale should be "ru"
+	t.Setenv("GEMINI_LOCALE", "")
+	bodyRu, err := BuildStreamGenerateBody("Test", nil, conv, config.TierLow, "token")
+	if err != nil {
+		t.Fatalf("BuildStreamGenerateBody failed: %v", err)
+	}
+	valsRu, _ := url.ParseQuery(bodyRu)
+	freqRu := valsRu.Get("f.req")
+	if !strings.Contains(freqRu, `[\"ru\"]`) {
+		t.Errorf("Expected [\\\"ru\\\"] in default payload, got %s", freqRu)
+	}
+
+	// Custom locale
+	t.Setenv("GEMINI_LOCALE", "en")
+	bodyEn, err := BuildStreamGenerateBody("Test", nil, conv, config.TierLow, "token")
+	if err != nil {
+		t.Fatalf("BuildStreamGenerateBody failed: %v", err)
+	}
+	valsEn, _ := url.ParseQuery(bodyEn)
+	freqEn := valsEn.Get("f.req")
+	if !strings.Contains(freqEn, `[\"en\"]`) {
+		t.Errorf("Expected [\\\"en\\\"] in custom payload, got %s", freqEn)
+	}
+}
+
 func TestParseStream_WithThinkingAndText(t *testing.T) {
 	// Mock Google RPC stream
 	innerObj := []any{
@@ -146,5 +174,108 @@ func TestParseStream_EmbeddedThoughtTags(t *testing.T) {
 	}
 	if resp.Text != "Ответ за пределами тега." {
 		t.Errorf("Expected text 'Ответ за пределами тега.', got %q", resp.Text)
+	}
+}
+
+func TestParseStream_ThoughtBlocks(t *testing.T) {
+	innerObj := []any{
+		nil,
+		[]any{"c_block_01", "r_block_02"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_block_03",
+				[]any{":::thought\nРазмышления внутри блока :::thought\nШаг 1\n:::\nОсновной текст ответа."},
+			},
+		},
+	}
+	innerBytes, _ := json.Marshal(innerObj)
+	envelope := [][]any{{"wrb.fr", nil, string(innerBytes)}}
+	envelopeBytes, _ := json.Marshal(envelope)
+	rawStream := ")]}'\n" + string(envelopeBytes) + "\n"
+
+	resp, err := ParseStream(strings.NewReader(rawStream))
+	if err != nil {
+		t.Fatalf("ParseStream failed: %v", err)
+	}
+
+	expectedThought := "Размышления внутри блока :::thought\nШаг 1"
+	if resp.Thought != expectedThought {
+		t.Errorf("Expected thought %q, got %q", expectedThought, resp.Thought)
+	}
+	if resp.Text != "Основной текст ответа." {
+		t.Errorf("Expected text 'Основной текст ответа.', got %q", resp.Text)
+	}
+}
+
+func TestParseStream_ReasoningAndThoughtTraceKeys(t *testing.T) {
+	innerObj := []any{
+		nil,
+		[]any{"c_key_01", "r_key_02"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_key_03",
+				[]any{"Финальный ответ"},
+				map[string]any{"reasoning": "Логический вывод через reasoning ключ"},
+			},
+			[]any{
+				"rc_key_04",
+				[]any{"Финальный ответ 2"},
+				map[string]any{"thought_trace": "Трассировка через thought_trace ключ"},
+			},
+		},
+	}
+	innerBytes, _ := json.Marshal(innerObj)
+	envelope := [][]any{{"wrb.fr", nil, string(innerBytes)}}
+	envelopeBytes, _ := json.Marshal(envelope)
+	rawStream := ")]}'\n" + string(envelopeBytes) + "\n"
+
+	resp, err := ParseStream(strings.NewReader(rawStream))
+	if err != nil {
+		t.Fatalf("ParseStream failed: %v", err)
+	}
+
+	if !strings.Contains(resp.Thought, "Логический вывод через reasoning ключ") {
+		t.Errorf("Expected reasoning in thought, got: %q", resp.Thought)
+	}
+	if !strings.Contains(resp.Thought, "Трассировка через thought_trace ключ") {
+		t.Errorf("Expected thought_trace in thought, got: %q", resp.Thought)
+	}
+}
+
+func TestParseStream_MixedThoughtTagAndBlock(t *testing.T) {
+	innerObj := []any{
+		nil,
+		[]any{"c_mix_01", "r_mix_02"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_mix_03",
+				[]any{":::thought\nБлок рассуждений 1\n:::\n<thought>Тег рассуждений 2</thought>\nИтоговый результат."},
+			},
+		},
+	}
+	innerBytes, _ := json.Marshal(innerObj)
+	envelope := [][]any{{"wrb.fr", nil, string(innerBytes)}}
+	envelopeBytes, _ := json.Marshal(envelope)
+	rawStream := ")]}'\n" + string(envelopeBytes) + "\n"
+
+	resp, err := ParseStream(strings.NewReader(rawStream))
+	if err != nil {
+		t.Fatalf("ParseStream failed: %v", err)
+	}
+
+	if !strings.Contains(resp.Thought, "Блок рассуждений 1") {
+		t.Errorf("Missing block thought, got: %q", resp.Thought)
+	}
+	if !strings.Contains(resp.Thought, "Тег рассуждений 2") {
+		t.Errorf("Missing tag thought, got: %q", resp.Thought)
+	}
+	if resp.Text != "Итоговый результат." {
+		t.Errorf("Expected text 'Итоговый результат.', got %q", resp.Text)
 	}
 }

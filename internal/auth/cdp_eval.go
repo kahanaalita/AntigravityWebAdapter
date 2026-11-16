@@ -49,6 +49,16 @@ func (s *SessionManager) FetchWizDataViaCDP(ctx context.Context) (*WizData, erro
 	}
 	defer conn.Close()
 
+	stopWatcher := make(chan struct{})
+	defer close(stopWatcher)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatcher:
+		}
+	}()
+
 	jsExpr := `JSON.stringify({SNlM0e: window.WIZ_global_data?.SNlM0e || '', cfb2h: window.WIZ_global_data?.cfb2h || '', FdrFJe: window.WIZ_global_data?.FdrFJe || ''})`
 
 	req := cdpEvalRequest{
@@ -61,13 +71,25 @@ func (s *SessionManager) FetchWizDataViaCDP(ctx context.Context) (*WizData, erro
 	}
 
 	if err := conn.WriteJSON(req); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("context canceled: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("write Runtime.evaluate: %w", err)
 	}
 
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		var resp cdpEvalResponse
 		if err := conn.ReadJSON(&resp); err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("context canceled: %w", ctx.Err())
+			}
 			return nil, fmt.Errorf("read cdp eval response: %w", err)
 		}
 		if resp.ID == 101 {
@@ -76,7 +98,7 @@ func (s *SessionManager) FetchWizDataViaCDP(ctx context.Context) (*WizData, erro
 			}
 			var data struct {
 				SNlM0e string `json:"SNlM0e"`
-				cfb2h  string `json:"cfb2h"`
+				Cfb2h  string `json:"cfb2h"`
 				FdrFJe string `json:"FdrFJe"`
 			}
 			if err := json.Unmarshal([]byte(resp.Result.Result.Value), &data); err != nil {
@@ -87,7 +109,7 @@ func (s *SessionManager) FetchWizDataViaCDP(ctx context.Context) (*WizData, erro
 			}
 			return &WizData{
 				At:  data.SNlM0e,
-				Bl:  data.cfb2h,
+				Bl:  data.Cfb2h,
 				Sid: data.FdrFJe,
 			}, nil
 		}

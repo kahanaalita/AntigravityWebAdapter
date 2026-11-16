@@ -137,8 +137,14 @@ func (u *ScottyUploader) UploadSingle(ctx context.Context, img ResolvedImage) (*
 
 	uploadRef := extractUploadRef(string(uploadRespBytes), respUpload.Header)
 	if uploadRef == "" {
-		// Fallback to synthetic ref with timestamp if not parsed
-		uploadRef = fmt.Sprintf("/contrib_service/ttl_1d/%s", img.FileName)
+		snippet := strings.TrimSpace(string(uploadRespBytes))
+		if len(snippet) > 512 {
+			snippet = snippet[:512] + "..."
+		}
+		if snippet == "" {
+			snippet = "<empty>"
+		}
+		return nil, fmt.Errorf("scotty upload failed to extract uploadRef (status %d, snippet %s)", respUpload.StatusCode, snippet)
 	}
 
 	return &geminiweb.ScottyAttachment{

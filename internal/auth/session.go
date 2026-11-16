@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -196,24 +197,56 @@ type SessionManager struct {
 	lastWizFetch time.Time
 }
 
+// createDialer creates a net.Dialer with a 30-second timeout.
+// By default, it uses system DNS resolution.
+// If customDNS is specified (e.g. from CUSTOM_DNS_RESOLVER env var),
+// it resolves via that server with fallback to the default resolver.
+func createDialer(customDNS string) net.Dialer {
+	dialer := net.Dialer{
+		Timeout: 30 * time.Second,
+	}
+
+	if customDNS = strings.TrimSpace(customDNS); customDNS != "" {
+		dnsAddr := customDNS
+		if !strings.Contains(dnsAddr, ":") {
+			dnsAddr = net.JoinHostPort(dnsAddr, "53")
+		}
+
+		dialer.Resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				d := net.Dialer{Timeout: 5 * time.Second}
+				conn, err := d.DialContext(ctx, "udp", dnsAddr)
+				if err != nil {
+					// Fallback to default resolver
+					if net.DefaultResolver != nil && net.DefaultResolver.Dial != nil {
+						return net.DefaultResolver.Dial(ctx, network, address)
+					}
+					return d.DialContext(ctx, network, address)
+				}
+				return conn, nil
+			},
+		}
+	}
+
+	return dialer
+}
+
 // NewSessionManager creates a SessionManager.
 func NewSessionManager(cookiePath, cdpURL string) (*SessionManager, error) {
 	jar := tls_client.NewCookieJar()
 
-	resolver := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{Timeout: 3 * time.Second}
-			return d.DialContext(ctx, "udp", "1.1.1.1:53")
-		},
-	}
-	dialer := net.Dialer{
-		Resolver: resolver,
-		Timeout:  30 * time.Second,
+	dialer := createDialer(os.Getenv("CUSTOM_DNS_RESOLVER"))
+
+	timeoutSeconds := 660
+	if v := os.Getenv("TLS_CLIENT_TIMEOUT"); v != "" {
+		if sec, err := strconv.Atoi(v); err == nil && sec > 0 {
+			timeoutSeconds = sec
+		}
 	}
 
 	options := []tls_client.HttpClientOption{
-		tls_client.WithTimeoutSeconds(120),
+		tls_client.WithTimeoutSeconds(timeoutSeconds),
 		tls_client.WithClientProfile(profiles.Safari_16_0),
 		tls_client.WithCookieJar(jar),
 		tls_client.WithNotFollowRedirects(),

@@ -179,12 +179,25 @@ func fetchCookiesViaWebSocket(ctx context.Context, wsURL string) ([]CDPCookie, e
 	}
 	defer conn.Close()
 
+	stopWatcher := make(chan struct{})
+	defer close(stopWatcher)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-stopWatcher:
+		}
+	}()
+
 	// 1. Enable Network domain
 	reqEnable := cdpRequest{
 		ID:     1,
 		Method: "Network.enable",
 	}
 	if err := conn.WriteJSON(reqEnable); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("context canceled: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("write Network.enable: %w", err)
 	}
 
@@ -201,6 +214,9 @@ func fetchCookiesViaWebSocket(ctx context.Context, wsURL string) ([]CDPCookie, e
 		},
 	}
 	if err := conn.WriteJSON(reqCookies); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("context canceled: %w", ctx.Err())
+		}
 		return nil, fmt.Errorf("write Network.getCookies: %w", err)
 	}
 
@@ -209,8 +225,17 @@ func fetchCookiesViaWebSocket(ctx context.Context, wsURL string) ([]CDPCookie, e
 	_ = conn.SetReadDeadline(deadline)
 
 	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		var resp cdpResponse
 		if err := conn.ReadJSON(&resp); err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("context canceled: %w", ctx.Err())
+			}
 			return nil, fmt.Errorf("read cdp response: %w", err)
 		}
 
