@@ -1,11 +1,11 @@
 ---
 name: a-argon-low
-description: Argon 4 (Low Effort) — быстрый ответ. Команды: /a-argon-low, /argon low.
+description: Argon 4 (Low Effort) — быстрый ответ (таймаут 20м стриминга, 5м idle). Команды: /a-argon-low, /argon low.
 ---
 
 # Argon 4 — Low Effort (/a-argon-low)
 
-Активируется при выборе `/a-argon-low`, `/argon-low` или вводе `/argon low`. Вызывает модель **Argon 4** с быстрым базовым бюджетом рассуждений (`effort="low"`).
+Активируется при выборе `/a-argon-low`, `/argon-low` или вводе `/argon low`. Вызывает модель **Argon 4** с быстрым базовым бюджетом рассуждений (`effort="low"`), серверным таймаутом стриминга 20 минут (1200с) и лимитом ожидания первого токена 5 минут (300с).
 
 ## Инструкция по выполнению
 

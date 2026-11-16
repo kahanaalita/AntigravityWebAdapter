@@ -1,13 +1,13 @@
 ---
 name: hydrogen
-description: Вызов модели Hydrogen 4 (Google AI Pro Web) с выбором уровня рассуждений (low, middle, high). Слэш-команда /hydrogen.
+description: Вызов модели Hydrogen 4 (Google AI Pro Web) с выбором уровня рассуждений (low, middle, high) (таймаут 20м стриминга, 5м idle). Слэш-команда /hydrogen.
 metadata:
   icon: science
 ---
 
 # Hydrogen 4 Skill (/hydrogen)
 
-Этот скилл активируется при вводе команды `/hydrogen` или обращении к веб-модели **Hydrogen 4** (Google AI Pro).
+Этот скилл активируется при вводе команды `/hydrogen` или обращении к веб-модели **Hydrogen 4** (Google AI Pro). Единый серверный таймаут стриминга составляет 20 минут (1200с) с лимитом простоя потока 5 минут (300с) для всех уровней рассуждений.
 
 ## Поддержка режимов рассуждений (effort)
 

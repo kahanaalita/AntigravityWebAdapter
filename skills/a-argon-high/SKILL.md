@@ -1,11 +1,11 @@
 ---
 name: a-argon-high
-description: Argon 4 (High Effort) — максимальный синтез и глубокий анализ. Команды: /a-argon-high, /argon high.
+description: Argon 4 (High Effort) — максимальный синтез и глубокий анализ (таймаут 20м стриминга, 5м idle). Команды: /a-argon-high, /argon high.
 ---
 
 # Argon 4 — High Effort (/a-argon-high)
 
-Активируется при выборе `/a-argon-high`, `/argon-high` или вводе `/argon high`. Вызывает модель **Argon 4** с максимальным бюджетом рассуждений (`effort="high"`).
+Активируется при выборе `/a-argon-high`, `/argon-high` или вводе `/argon high`. Вызывает модель **Argon 4** с максимальным бюджетом рассуждений (`effort="high"`), серверным таймаутом стриминга 20 минут (1200с) и лимитом ожидания первого токена 5 минут (300с).
 
 ## Инструкция по выполнению
 

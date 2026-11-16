@@ -358,3 +358,33 @@ func TestFetchCookiesViaWebSocket_ContextCancellation(t *testing.T) {
 		t.Errorf("fetchCookiesViaWebSocket took too long to cancel: %v (expected < 1s)", elapsed)
 	}
 }
+
+func TestBridgeGenerate_DefaultTimeout(t *testing.T) {
+	srv, sm := setupMockCDPServer(t, func(conn *websocket.Conn) {
+		var req cdpEvalRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+		resp := cdpEvalResponse{
+			ID: 201,
+		}
+		resp.Result.Result.Type = "string"
+		resp.Result.Result.Value = ")]}'\n[[\"wrb.fr\",null,\"default_timeout_ok\"]]"
+		_ = conn.WriteJSON(resp)
+	})
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	val, err := sm.BridgeGenerate(ctx, BridgeGenerateParams{
+		Body:    "f.req=test",
+		Timeout: 0, // Should use default 20 minutes timeout
+	})
+	if err != nil {
+		t.Fatalf("BridgeGenerate with zero timeout failed: %v", err)
+	}
+	if !strings.Contains(val, "default_timeout_ok") {
+		t.Errorf("unexpected return val: %s", val)
+	}
+}

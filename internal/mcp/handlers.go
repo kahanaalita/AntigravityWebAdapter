@@ -65,13 +65,13 @@ func (h *ServerHandler) Register(s *server.MCPServer) {
 		)
 	}
 
-	registerAtomicTool("hydrogen_low", "hydrogen-4", "low", "Hydrogen 4 with low reasoning effort (fast response, 120s timeout)")
-	registerAtomicTool("hydrogen_middle", "hydrogen-4", "middle", "Hydrogen 4 with middle reasoning effort (balanced, 300s timeout)")
-	registerAtomicTool("hydrogen_high", "hydrogen-4", "high", "Hydrogen 4 with high reasoning effort (deep analysis, 600s timeout)")
+	registerAtomicTool("hydrogen_low", "hydrogen-4", "low", "Hydrogen 4 with low reasoning effort (fast response, 20m streaming timeout, 5m idle)")
+	registerAtomicTool("hydrogen_middle", "hydrogen-4", "middle", "Hydrogen 4 with middle reasoning effort (balanced analysis, 20m streaming timeout, 5m idle)")
+	registerAtomicTool("hydrogen_high", "hydrogen-4", "high", "Hydrogen 4 with high reasoning effort (deep analysis, 20m streaming timeout, 5m idle)")
 
-	registerAtomicTool("argon_low", "argon-4", "low", "Argon 4 with low reasoning effort (fast response, 120s timeout)")
-	registerAtomicTool("argon_medium", "argon-4", "medium", "Argon 4 with medium reasoning effort (balanced, 300s timeout)")
-	registerAtomicTool("argon_high", "argon-4", "high", "Argon 4 with high reasoning effort (deep synthesis, 600s timeout)")
+	registerAtomicTool("argon_low", "argon-4", "low", "Argon 4 with low reasoning effort (fast response, 20m streaming timeout, 5m idle)")
+	registerAtomicTool("argon_medium", "argon-4", "medium", "Argon 4 with medium reasoning effort (balanced synthesis, 20m streaming timeout, 5m idle)")
+	registerAtomicTool("argon_high", "argon-4", "high", "Argon 4 with high reasoning effort (deep synthesis, 20m streaming timeout, 5m idle)")
 
 	// 3. MCP Prompts: hydrogen and argon
 	s.AddPrompt(

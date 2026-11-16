@@ -32,6 +32,26 @@ func TestHandlerRegistration(t *testing.T) {
 
 	handler.Register(s)
 
+	expectedDescriptions := map[string]string{
+		"hydrogen_low":    "Hydrogen 4 with low reasoning effort (fast response, 20m streaming timeout, 5m idle)",
+		"hydrogen_middle": "Hydrogen 4 with middle reasoning effort (balanced analysis, 20m streaming timeout, 5m idle)",
+		"hydrogen_high":   "Hydrogen 4 with high reasoning effort (deep analysis, 20m streaming timeout, 5m idle)",
+		"argon_low":       "Argon 4 with low reasoning effort (fast response, 20m streaming timeout, 5m idle)",
+		"argon_medium":    "Argon 4 with medium reasoning effort (balanced synthesis, 20m streaming timeout, 5m idle)",
+		"argon_high":      "Argon 4 with high reasoning effort (deep synthesis, 20m streaming timeout, 5m idle)",
+	}
+
+	for toolName, expectedDesc := range expectedDescriptions {
+		tTool := s.GetTool(toolName)
+		if tTool == nil {
+			t.Errorf("Tool %s not registered", toolName)
+			continue
+		}
+		if tTool.Tool.Description != expectedDesc {
+			t.Errorf("Tool %s description mismatch:\nexpected: %s\ngot:      %s", toolName, expectedDesc, tTool.Tool.Description)
+		}
+	}
+
 	// Test Prompt Template for Hydrogen
 	promptRes, err := handler.handlePromptTemplate("hydrogen-4", "middle", mcp.GetPromptRequest{
 		Params: mcp.GetPromptParams{

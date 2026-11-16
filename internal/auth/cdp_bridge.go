@@ -106,9 +106,11 @@ func (s *SessionManager) BridgeGenerate(ctx context.Context, params BridgeGenera
 
 	timeout := params.Timeout
 	if timeout <= 0 {
-		timeout = 120 * time.Second
+		// Официальный таймаут стриминга Google Gemini 4 (20 минут)
+		timeout = 20 * time.Minute
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(timeout + 15*time.Second))
+	// Устанавливаем дедлайн чтения с запасом 30 секунд над временем выполнения генерации
+	_ = conn.SetReadDeadline(time.Now().Add(timeout + 30*time.Second))
 
 	for {
 		select {

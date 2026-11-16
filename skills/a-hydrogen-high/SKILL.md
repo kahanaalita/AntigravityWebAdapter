@@ -1,11 +1,11 @@
 ---
 name: a-hydrogen-high
-description: Hydrogen 4 (High Effort) — глубокий логический анализ. Команды: /a-hydrogen-high, /hydrogen high.
+description: Hydrogen 4 (High Effort) — глубокий логический анализ (таймаут 20м стриминга, 5м idle). Команды: /a-hydrogen-high, /hydrogen high.
 ---
 
 # Hydrogen 4 — High Effort (/a-hydrogen-high)
 
-Активируется при выборе `/a-hydrogen-high`, `/hydrogen-high` или вводе `/hydrogen high`. Вызывает модель **Hydrogen 4** с максимальным бюджетом рассуждений (`effort="high"`).
+Активируется при выборе `/a-hydrogen-high`, `/hydrogen-high` или вводе `/hydrogen high`. Вызывает модель **Hydrogen 4** с максимальным бюджетом рассуждений (`effort="high"`), серверным таймаутом стриминга 20 минут (1200с) и лимитом ожидания первого токена 5 минут (300с).
 
 ## Инструкция по выполнению
 

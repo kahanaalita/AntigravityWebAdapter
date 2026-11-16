@@ -1,13 +1,13 @@
 ---
 name: hydrogen-low
-description: Hydrogen 4 с базовым уровнем рассуждений (low effort) для быстрых ответов. Команды: /hydrogen-low, /hydrogen low.
+description: Hydrogen 4 с базовым уровнем рассуждений (low effort) для быстрых ответов (таймаут 20м стриминга, 5м idle). Команды: /hydrogen-low, /hydrogen low.
 metadata:
   icon: flash_on
 ---
 
 # Hydrogen 4 — Low Effort (/hydrogen-low)
 
-Этот скилл активируется при выборе команды `/hydrogen-low` или вводе `/hydrogen low`. Использует модель **Hydrogen 4** с быстрым базовым бюджетом рассуждений (`effort="low"`).
+Этот скилл активируется при выборе команды `/hydrogen-low` или вводе `/hydrogen low`. Использует модель **Hydrogen 4** с быстрым базовым бюджетом рассуждений (`effort="low"`), серверным таймаутом стриминга 20 минут (1200с) и лимитом ожидания первого токена 5 минут (300с).
 
 ## Инструкция по выполнению
 

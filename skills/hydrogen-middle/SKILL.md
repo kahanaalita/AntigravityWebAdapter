@@ -1,13 +1,13 @@
 ---
 name: hydrogen-middle
-description: Hydrogen 4 со сбалансированным уровнем рассуждений (middle effort). Команды: /hydrogen-middle, /hydrogen middle.
+description: Hydrogen 4 со сбалансированным уровнем рассуждений (middle effort) (таймаут 20м стриминга, 5м idle). Команды: /hydrogen-middle, /hydrogen middle.
 metadata:
   icon: science
 ---
 
 # Hydrogen 4 — Middle Effort (/hydrogen-middle)
 
-Этот скилл активируется при выборе команды `/hydrogen-middle` или вводе `/hydrogen middle`. Использует модель **Hydrogen 4** со сбалансированным бюджетом рассуждений (`effort="middle"`).
+Этот скилл активируется при выборе команды `/hydrogen-middle` или вводе `/hydrogen middle`. Использует модель **Hydrogen 4** со сбалансированным бюджетом рассуждений (`effort="middle"`), серверным таймаутом стриминга 20 минут (1200с) и лимитом ожидания первого токена 5 минут (300с).
 
 ## Инструкция по выполнению
 

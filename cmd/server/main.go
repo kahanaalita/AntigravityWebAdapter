@@ -217,9 +217,11 @@ func runInstallCommands(workDir string) error {
       "env": {
         "CHROME_CDP_URL": "http://127.0.0.1:9222",
         "DEFAULT_HYDROGEN_EFFORT": "middle",
-        "DEFAULT_ARGON_EFFORT": "medium"
+        "DEFAULT_ARGON_EFFORT": "medium",
+        "DEFAULT_STREAMING_TIMEOUT_SECONDS": "1200",
+        "TLS_CLIENT_TIMEOUT": "1260"
       },
-      "timeoutSeconds": 600
+      "timeoutSeconds": 1200
     }
   }
 }

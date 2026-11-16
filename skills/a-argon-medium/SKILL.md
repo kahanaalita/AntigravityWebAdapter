@@ -1,11 +1,11 @@
 ---
 name: a-argon-medium
-description: Argon 4 (Medium Effort) — сбалансированный анализ. Команды: /a-argon-medium, /argon medium.
+description: Argon 4 (Medium Effort) — сбалансированный анализ (таймаут 20м стриминга, 5м idle). Команды: /a-argon-medium, /argon medium.
 ---
 
 # Argon 4 — Medium Effort (/a-argon-medium)
 
-Активируется при выборе `/a-argon-medium`, `/argon-medium` или вводе `/argon medium`. Вызывает модель **Argon 4** со сбалансированным бюджетом рассуждений (`effort="medium"`).
+Активируется при выборе `/a-argon-medium`, `/argon-medium` или вводе `/argon medium`. Вызывает модель **Argon 4** со сбалансированным бюджетом рассуждений (`effort="medium"`), серверным таймаутом стриминга 20 минут (1200с) и лимитом ожидания первого токена 5 минут (300с).
 
 ## Инструкция по выполнению
 

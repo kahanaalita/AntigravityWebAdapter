@@ -9,8 +9,8 @@
 ## Возможности
 
 1. **Модели и уровни рассуждения:**
-   - **Hydrogen 4**: `/hydrogen low` (120s), `/hydrogen middle` (300s, по умолчанию), `/hydrogen high` (600s).
-   - **Argon 4**: `/argon low` (120s), `/argon medium` (300s, по умолчанию), `/argon high` (600s).
+   - **Hydrogen 4**: `/hydrogen low`, `/hydrogen middle` (по умолчанию), `/hydrogen high` (единый серверный стриминг-таймаут 20 мин / 1200с, лимит простоя потока 5 мин).
+   - **Argon 4**: `/argon low`, `/argon medium` (по умолчанию), `/argon high` (единый серверный стриминг-таймаут 20 мин / 1200с, лимит простоя потока 5 мин).
    - Мягкий фоллбэк и кросс-алиасинг (`middle` ↔ `medium`).
 2. **Прозрачная мультимодальность:**
    - Чтение путей из текста промпта (`@./path/to/image.png`).
@@ -56,9 +56,11 @@ go build -o bin/agy-gemini-web-mcp ./cmd/server
       "env": {
         "CHROME_CDP_URL": "http://127.0.0.1:9222",
         "DEFAULT_HYDROGEN_EFFORT": "middle",
-        "DEFAULT_ARGON_EFFORT": "medium"
+        "DEFAULT_ARGON_EFFORT": "medium",
+        "DEFAULT_STREAMING_TIMEOUT_SECONDS": "1200",
+        "TLS_CLIENT_TIMEOUT": "1260"
       },
-      "timeoutSeconds": 600
+      "timeoutSeconds": 1200
     }
   }
 }
