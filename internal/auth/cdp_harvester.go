@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -96,7 +97,43 @@ func (s *SessionManager) harvestCookiesFromCDPLocked(ctx context.Context) error 
 }
 
 func resolveWebSocketDebuggerURL(ctx context.Context, endpoint string) (string, error) {
-	return resolveGeminiTargetURL(ctx, endpoint)
+	wsURL, err := resolveGeminiTargetURL(ctx, endpoint)
+	if err == nil {
+		return wsURL, nil
+	}
+
+	if strings.HasPrefix(endpoint, "ws://") || strings.HasPrefix(endpoint, "wss://") {
+		return "", err
+	}
+
+	// Fallback: search for any active page target in Chrome via /json,
+	// as Network.getCookies can harvest cookies from any page target.
+	clean := strings.TrimRight(endpoint, "/")
+	req, err := http.NewRequestWithContext(ctx, "GET", clean+"/json", nil)
+	if err != nil {
+		return "", err
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	var targets []struct {
+		Type                 string `json:"type"`
+		WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&targets); err == nil {
+		for _, t := range targets {
+			if t.Type == "page" && t.WebSocketDebuggerURL != "" {
+				return t.WebSocketDebuggerURL, nil
+			}
+		}
+	}
+
+	return "", errors.New("no active Chrome page target found via CDP for cookie harvesting")
 }
 
 func fetchCookiesViaWebSocket(ctx context.Context, wsURL string) ([]CDPCookie, error) {

@@ -60,7 +60,7 @@ func (h *ServerHandler) Register(s *server.MCPServer) {
 				mcp.WithString("conversation_id", mcp.Description("Optional conversation ID to continue")),
 			),
 			func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				return h.executeAsk(ctx, model, effort, req.GetArguments())
+				return h.executeAsk(ctx, model, effort, req.GetArguments(), false)
 			},
 		)
 	}
@@ -105,10 +105,10 @@ func (h *ServerHandler) handleUnifiedAsk(ctx context.Context, req mcp.CallToolRe
 	args := req.GetArguments()
 	model, _ := args["model"].(string)
 	effort, _ := args["effort"].(string)
-	return h.executeAsk(ctx, model, effort, args)
+	return h.executeAsk(ctx, model, effort, args, true)
 }
 
-func (h *ServerHandler) prepareAskRequest(rawModel, rawEffort string, args map[string]any) (*geminiweb.StreamGenerateRequest, []media.ResolvedImage, error) {
+func (h *ServerHandler) prepareAskRequest(rawModel, rawEffort string, args map[string]any, allowSlashOverride bool) (*geminiweb.StreamGenerateRequest, []media.ResolvedImage, error) {
 	rawPrompt, _ := args["prompt"].(string)
 	if strings.TrimSpace(rawPrompt) == "" {
 		return nil, nil, fmt.Errorf("prompt cannot be empty")
@@ -140,14 +140,16 @@ func (h *ServerHandler) prepareAskRequest(rawModel, rawEffort string, args map[s
 		}
 	}
 
-	// Route slash command only if the prompt begins with '/'
-	slashRes, err := ParseSlashCommand(rawPrompt, "", "")
-	if err == nil && slashRes.Model != "" {
-		rawModel = string(slashRes.Model)
-		if slashRes.Effort != "" {
-			rawEffort = string(slashRes.Effort)
+	// Route slash command only if allowSlashOverride is true (e.g. gemini_pro_web_ask)
+	if allowSlashOverride {
+		slashRes, err := ParseSlashCommand(rawPrompt, "", "")
+		if err == nil && slashRes.Model != "" {
+			rawModel = string(slashRes.Model)
+			if slashRes.Effort != "" {
+				rawEffort = string(slashRes.Effort)
+			}
+			rawPrompt = slashRes.Prompt
 		}
-		rawPrompt = slashRes.Prompt
 	}
 
 	if rawModel == "" {
@@ -173,8 +175,8 @@ func (h *ServerHandler) prepareAskRequest(rawModel, rawEffort string, args map[s
 	}, resolvedImages, nil
 }
 
-func (h *ServerHandler) executeAsk(ctx context.Context, rawModel, rawEffort string, args map[string]any) (*mcp.CallToolResult, error) {
-	genReq, resolvedImages, err := h.prepareAskRequest(rawModel, rawEffort, args)
+func (h *ServerHandler) executeAsk(ctx context.Context, rawModel, rawEffort string, args map[string]any, allowSlashOverride bool) (*mcp.CallToolResult, error) {
+	genReq, resolvedImages, err := h.prepareAskRequest(rawModel, rawEffort, args, allowSlashOverride)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}

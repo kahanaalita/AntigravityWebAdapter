@@ -30,8 +30,18 @@ func NewCookieRotator(session *SessionManager, interval time.Duration) *CookieRo
 	}
 }
 
-// Start launches the background rotation loop.
+// Start launches the background rotation loop and immediately performs an initial rotation check.
 func (r *CookieRotator) Start(ctx context.Context) {
+	go func() {
+		initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		if err := r.RotateOnce(initCtx); err != nil {
+			log.Printf("[rotator] initial startup cookie rotation notice: %v", err)
+		} else {
+			log.Printf("[rotator] initial startup cookie rotation verified successfully")
+		}
+	}()
+
 	go func() {
 		ticker := time.NewTicker(r.interval)
 		defer ticker.Stop()

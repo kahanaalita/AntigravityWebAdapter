@@ -100,7 +100,12 @@ func (u *ScottyUploader) UploadSingle(ctx context.Context, img ResolvedImage) (*
 
 	uploadURL := respStart.Header.Get("X-Goog-Upload-URL")
 	if uploadURL == "" {
-		uploadURL = respStart.Header.Get("x-goog-upload-url")
+		for k, v := range respStart.Header {
+			if strings.EqualFold(k, "X-Goog-Upload-URL") && len(v) > 0 && v[0] != "" {
+				uploadURL = v[0]
+				break
+			}
+		}
 	}
 	if uploadURL == "" {
 		return nil, errors.New("scotty start did not return X-Goog-Upload-URL header")
@@ -155,7 +160,12 @@ func (u *ScottyUploader) UploadSingle(ctx context.Context, img ResolvedImage) (*
 }
 
 func extractUploadRef(body string, hdr fhttp.Header) string {
-	// 1. Try header
+	// 1. Try header (case-insensitive for HTTP/2)
+	for k, v := range hdr {
+		if strings.EqualFold(k, "X-Goog-Upload-Status-Resource-Id") && len(v) > 0 && v[0] != "" {
+			return v[0]
+		}
+	}
 	if ref := hdr.Get("X-Goog-Upload-Status-Resource-Id"); ref != "" {
 		return ref
 	}

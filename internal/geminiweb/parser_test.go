@@ -386,3 +386,170 @@ func TestParseStream_CandidateAccumulatesAllParts(t *testing.T) {
 		t.Errorf("Expected accumulated text %q, got %q", expected, resp.Text)
 	}
 }
+
+func TestParseStream_GoogleAPIErrorJSON(t *testing.T) {
+	testCases := []struct {
+		name        string
+		input       string
+		expectedSub string
+	}{
+		{
+			name: "error json with magic prefix",
+			input: ")]}'\n" + `{"error": {"code": 429, "message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"}}`,
+			expectedSub: "google api error 429 [RESOURCE_EXHAUSTED]: Resource exhausted",
+		},
+		{
+			name: "error json without magic prefix",
+			input: `{"error": {"code": 429, "message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"}}`,
+			expectedSub: "google api error 429 [RESOURCE_EXHAUSTED]: Resource exhausted",
+		},
+		{
+			name: "error envelope er RPC",
+			input: ")]}'\n" + `[["er", null, "{\"error\": {\"code\": 403, \"message\": \"Permission denied\", \"status\": \"PERMISSION_DENIED\"}}"]]`,
+			expectedSub: "google api error 403 [PERMISSION_DENIED]: Permission denied",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := ParseStream(strings.NewReader(tc.input))
+			if err == nil {
+				t.Fatalf("Expected error for %s, got nil response: %+v", tc.name, resp)
+			}
+			if errors.Is(err, ErrEmptyParsedResponse) {
+				t.Errorf("Expected Google API error, but got generic ErrEmptyParsedResponse: %v", err)
+			}
+			if !strings.Contains(err.Error(), tc.expectedSub) {
+				t.Errorf("Expected error to contain %q, got %q", tc.expectedSub, err.Error())
+			}
+		})
+	}
+}
+
+func TestParseStream_MultiChunkThoughtDeduplication(t *testing.T) {
+	// Chunk 1: Choice rc_01, text "Часть 1.", thought "Анализирую входные параметры..."
+	inner1 := []any{
+		nil,
+		[]any{"c_stream_01", "r_stream_01"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_stream_01",
+				[]any{"Часть 1."},
+				map[string]any{"thought": "Анализирую входные параметры..."},
+			},
+		},
+	}
+	bytes1, _ := json.Marshal(inner1)
+	env1, _ := json.Marshal([][]any{{"wrb.fr", nil, string(bytes1)}})
+
+	// Chunk 2: Choice rc_01, accumulated text "Часть 1. Часть 2.", repeating same thought
+	inner2 := []any{
+		nil,
+		[]any{"c_stream_01", "r_stream_01"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_stream_01",
+				[]any{"Часть 1. ", "Часть 2."},
+				map[string]any{"thought": "Анализирую входные параметры..."},
+			},
+		},
+	}
+	bytes2, _ := json.Marshal(inner2)
+	env2, _ := json.Marshal([][]any{{"wrb.fr", nil, string(bytes2)}})
+
+	// Chunk 3: Choice rc_01, accumulated text "Часть 1. Часть 2. Финал.", repeating thought + new thought
+	inner3 := []any{
+		nil,
+		[]any{"c_stream_01", "r_stream_01"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_stream_01",
+				[]any{"Часть 1. ", "Часть 2. ", "Финал."},
+				map[string]any{"thought": "Анализирую входные параметры..."},
+				map[string]any{"thought": "Формирую структуру вывода..."},
+			},
+		},
+	}
+	bytes3, _ := json.Marshal(inner3)
+	env3, _ := json.Marshal([][]any{{"wrb.fr", nil, string(bytes3)}})
+
+	// Multi-chunk HTTP streaming response with length prefixes
+	stream := ")]}'\n" +
+		"100\n" + string(env1) + "\n" +
+		"120\n" + string(env2) + "\n" +
+		"150\n" + string(env3) + "\n"
+
+	resp, err := ParseStream(strings.NewReader(stream))
+	if err != nil {
+		t.Fatalf("ParseStream multi-chunk failed: %v", err)
+	}
+
+	if resp.Text != "Часть 1. Часть 2. Финал." {
+		t.Errorf("Unexpected accumulated text: %q", resp.Text)
+	}
+
+	// Verify thought deduplication: "Анализирую входные параметры..." must appear exactly ONCE
+	countThought1 := strings.Count(resp.Thought, "Анализирую входные параметры...")
+	if countThought1 != 1 {
+		t.Errorf("Expected thought 1 to appear exactly once, but appeared %d times: %q", countThought1, resp.Thought)
+	}
+
+	// Verify new thought from chunk 3 was also captured
+	countThought2 := strings.Count(resp.Thought, "Формирую структуру вывода...")
+	if countThought2 != 1 {
+		t.Errorf("Expected thought 2 to appear exactly once, but appeared %d times: %q", countThought2, resp.Thought)
+	}
+}
+
+func TestParseStream_MultiChunkThoughtPrefixExtension(t *testing.T) {
+	// Chunk 1: Thought is initially short
+	inner1 := []any{
+		nil,
+		[]any{"c_ext_01", "r_ext_01"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_ext_01",
+				[]any{"Привет"},
+				map[string]any{"thought": "Думаю над вопросом"},
+			},
+		},
+	}
+	bytes1, _ := json.Marshal(inner1)
+	env1, _ := json.Marshal([][]any{{"wrb.fr", nil, string(bytes1)}})
+
+	// Chunk 2: Thought extends earlier thought
+	inner2 := []any{
+		nil,
+		[]any{"c_ext_01", "r_ext_01"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_ext_01",
+				[]any{"Привет мир"},
+				map[string]any{"thought": "Думаю над вопросом\nДелаю шаг 2"},
+			},
+		},
+	}
+	bytes2, _ := json.Marshal(inner2)
+	env2, _ := json.Marshal([][]any{{"wrb.fr", nil, string(bytes2)}})
+
+	stream := ")]}'\n" + string(env1) + "\n" + string(env2) + "\n"
+	resp, err := ParseStream(strings.NewReader(stream))
+	if err != nil {
+		t.Fatalf("ParseStream failed: %v", err)
+	}
+
+	expectedThought := "Думаю над вопросом\nДелаю шаг 2"
+	if resp.Thought != expectedThought {
+		t.Errorf("Expected extended thought %q, got %q", expectedThought, resp.Thought)
+	}
+}

@@ -196,6 +196,7 @@ type SessionManager struct {
 	baseURL      string
 	chromePath   string
 	lastWizFetch time.Time
+	cdpSem       chan struct{}
 }
 
 // createDialer creates a net.Dialer with a 30-second timeout.
@@ -275,6 +276,7 @@ func NewSessionManager(cookiePath, cdpURL string) (*SessionManager, error) {
 		store:      store,
 		httpClient: client,
 		cdpURL:     cdpURL,
+		cdpSem:     make(chan struct{}, 3),
 	}, nil
 }
 

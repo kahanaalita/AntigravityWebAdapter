@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	reImgPath = regexp.MustCompile(`(?:^|\s)@([^\s"']+\.(png|jpg|jpeg|webp|gif|heic))(?:\s|$)`)
+	reImgPath = regexp.MustCompile(`(?:^|\s)@(?:"([^"]+\.(?i:png|jpg|jpeg|webp|gif|heic))"|'([^']+\.(?i:png|jpg|jpeg|webp|gif|heic))'|([^\s"']+\.(?i:png|jpg|jpeg|webp|gif|heic)))(?:\s|$)`)
 	reAtClip  = regexp.MustCompile(`(?:^|\s)@(clipboard)(?:\s|$)`)
 )
 
@@ -85,7 +85,17 @@ func (r *ImageResolver) ResolveFromPromptAndList(prompt string, explicitPaths []
 			if len(sub) <= 1 {
 				return match
 			}
-			p := strings.TrimSpace(sub[1])
+			var p string
+			for i := 1; i < len(sub); i++ {
+				if sub[i] != "" {
+					p = sub[i]
+					break
+				}
+			}
+			p = strings.Trim(strings.TrimPrefix(strings.TrimSpace(p), "@"), "\"'")
+			if p == "" {
+				return match
+			}
 			target := p
 			if !filepath.IsAbs(target) && r.WorkDir != "" {
 				target = filepath.Join(r.WorkDir, target)
@@ -133,7 +143,10 @@ func (r *ImageResolver) ResolveFromPromptAndList(prompt string, explicitPaths []
 			continue
 		}
 
-		cleanPath := strings.TrimPrefix(p, "@")
+		cleanPath := strings.Trim(strings.TrimPrefix(p, "@"), "\"'")
+		if cleanPath == "" {
+			continue
+		}
 		img, err := r.ResolveFile(cleanPath)
 		if err != nil {
 			return "", nil, fmt.Errorf("resolve image %q: %w", cleanPath, err)

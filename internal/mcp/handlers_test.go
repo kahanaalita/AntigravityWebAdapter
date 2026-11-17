@@ -82,7 +82,7 @@ func TestHandlerRegistration(t *testing.T) {
 	// Test Empty prompt error in executeAsk
 	callRes, err := handler.executeAsk(context.Background(), "hydrogen-4", "middle", map[string]any{
 		"prompt": "   ",
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("executeAsk failed: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestPrepareAskRequest_NoTruncation(t *testing.T) {
 	argonPrompt := "argon is an inert noble gas with atomic number 18"
 	req, _, err := handler.prepareAskRequest("hydrogen-4", "middle", map[string]any{
 		"prompt": argonPrompt,
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("prepareAskRequest failed: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestPrepareAskRequest_NoTruncation(t *testing.T) {
 	hydrogenPrompt := "hydrogen fuel cells produce clean electrical energy"
 	req, _, err = handler.prepareAskRequest("argon-4", "medium", map[string]any{
 		"prompt": hydrogenPrompt,
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("prepareAskRequest failed: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestPrepareAskRequest_NoTruncation(t *testing.T) {
 	lowPrompt := "low latency memory caching strategies"
 	req, _, err = handler.prepareAskRequest("argon-4", "high", map[string]any{
 		"prompt": lowPrompt,
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("prepareAskRequest failed: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestPrepareAskRequest_NoTruncation(t *testing.T) {
 	highPrompt := "high throughput network pipelines"
 	req, _, err = handler.prepareAskRequest("hydrogen-4", "middle", map[string]any{
 		"prompt": highPrompt,
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("prepareAskRequest failed: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestPrepareAskRequest_SlashCommandRouting(t *testing.T) {
 	// 1. Two-token slash command: /argon high
 	req, _, err := handler.prepareAskRequest("", "", map[string]any{
 		"prompt": "/argon high Спроектируй распределенную систему хранения",
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("prepareAskRequest failed: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestPrepareAskRequest_SlashCommandRouting(t *testing.T) {
 	// 2. Two-token slash command: /hydrogen middle
 	req, _, err = handler.prepareAskRequest("argon-4", "high", map[string]any{
 		"prompt": "/hydrogen middle Реши алгоритмическую задачу на графах",
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("prepareAskRequest failed: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestPrepareAskRequest_SlashCommandRouting(t *testing.T) {
 	// 3. Compound slash command: /a-argon-high
 	req, _, err = handler.prepareAskRequest("", "", map[string]any{
 		"prompt": "/a-argon-high Глубокий синтез архитектуры микросервисов",
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("prepareAskRequest failed: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestPrepareAskRequest_SlashCommandRouting(t *testing.T) {
 	// 4. Default model fallback when no model specified and no slash command
 	req, _, err = handler.prepareAskRequest("", "", map[string]any{
 		"prompt": "Какая сегодня погода?",
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("prepareAskRequest failed: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestPrepareAskRequest_MultimodalResolution(t *testing.T) {
 
 	req, resolved, err := handler.prepareAskRequest("argon-4", "high", map[string]any{
 		"prompt": "/argon high @architecture.png Проанализируй узкие места",
-	})
+	}, true)
 	if err != nil {
 		t.Fatalf("prepareAskRequest failed: %v", err)
 	}
@@ -253,5 +253,65 @@ func TestPrepareAskRequest_MultimodalResolution(t *testing.T) {
 	}
 	if len(resolved) != 1 || resolved[0].FileName != "architecture.png" {
 		t.Errorf("Expected resolved image architecture.png, got %v", resolved)
+	}
+}
+
+func TestAtomicTool_PreventsSlashOverride(t *testing.T) {
+	tempDir := t.TempDir()
+	resolver := media.NewImageResolver(tempDir)
+	handler := NewServerHandler(nil, nil, resolver, map[config.ModelType]string{
+		config.ModelHydrogen4: "h4_hex",
+		config.ModelArgon4:    "a4_hex",
+	})
+
+	// 1. Invoking atomic tool argon_high with prompt starting with /hydrogen low must NOT switch model or effort
+	req, _, err := handler.prepareAskRequest("argon-4", "high", map[string]any{
+		"prompt": "/hydrogen low test prompt",
+	}, false)
+	if err != nil {
+		t.Fatalf("prepareAskRequest failed: %v", err)
+	}
+	if req.ModelConfig.Model != config.ModelArgon4 {
+		t.Errorf("Model was overridden! Expected %v, got %v", config.ModelArgon4, req.ModelConfig.Model)
+	}
+	if req.ModelConfig.Effort != config.EffortHigh {
+		t.Errorf("Effort was overridden! Expected %v, got %v", config.EffortHigh, req.ModelConfig.Effort)
+	}
+	if req.Prompt != "/hydrogen low test prompt" {
+		t.Errorf("Prompt should be preserved as user prompt in atomic tool, got %q", req.Prompt)
+	}
+
+	// 2. Invoking atomic tool hydrogen_low with prompt starting with /argon high must NOT switch model or effort
+	reqH, _, err := handler.prepareAskRequest("hydrogen-4", "low", map[string]any{
+		"prompt": "/argon high complex analysis",
+	}, false)
+	if err != nil {
+		t.Fatalf("prepareAskRequest failed: %v", err)
+	}
+	if reqH.ModelConfig.Model != config.ModelHydrogen4 {
+		t.Errorf("Model was overridden! Expected %v, got %v", config.ModelHydrogen4, reqH.ModelConfig.Model)
+	}
+	if reqH.ModelConfig.Effort != config.EffortLow {
+		t.Errorf("Effort was overridden! Expected %v, got %v", config.EffortLow, reqH.ModelConfig.Effort)
+	}
+	if reqH.Prompt != "/argon high complex analysis" {
+		t.Errorf("Prompt should be preserved as user prompt in atomic tool, got %q", reqH.Prompt)
+	}
+
+	// 3. By contrast, unified ask (allowSlashOverride: true) DOES route slash command
+	reqUnified, _, err := handler.prepareAskRequest("argon-4", "high", map[string]any{
+		"prompt": "/hydrogen low test prompt",
+	}, true)
+	if err != nil {
+		t.Fatalf("prepareAskRequest failed: %v", err)
+	}
+	if reqUnified.ModelConfig.Model != config.ModelHydrogen4 {
+		t.Errorf("Unified ask should allow slash command to route model, got %v", reqUnified.ModelConfig.Model)
+	}
+	if reqUnified.ModelConfig.Effort != config.EffortLow {
+		t.Errorf("Unified ask should allow slash command to route effort, got %v", reqUnified.ModelConfig.Effort)
+	}
+	if reqUnified.Prompt != "test prompt" {
+		t.Errorf("Unified ask should strip slash command token, got %q", reqUnified.Prompt)
 	}
 }

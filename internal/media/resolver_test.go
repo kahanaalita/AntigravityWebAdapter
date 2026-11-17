@@ -91,6 +91,22 @@ func TestExtractUploadRef(t *testing.T) {
 	if ref != "/contrib_service/ttl_1d/header_ref_888" {
 		t.Errorf("Expected /contrib_service/ttl_1d/header_ref_888, got %q", ref)
 	}
+
+	// From Header (lowercase HTTP/2 wire format)
+	hdrLower := make(fhttp.Header)
+	hdrLower["x-goog-upload-status-resource-id"] = []string{"/contrib_service/ttl_1d/http2_lower_ref_777"}
+	refLower := extractUploadRef("", hdrLower)
+	if refLower != "/contrib_service/ttl_1d/http2_lower_ref_777" {
+		t.Errorf("Expected /contrib_service/ttl_1d/http2_lower_ref_777, got %q", refLower)
+	}
+
+	// From Header (uppercase)
+	hdrUpper := make(fhttp.Header)
+	hdrUpper["X-GOOG-UPLOAD-STATUS-RESOURCE-ID"] = []string{"/contrib_service/ttl_1d/http2_upper_ref_666"}
+	refUpper := extractUploadRef("", hdrUpper)
+	if refUpper != "/contrib_service/ttl_1d/http2_upper_ref_666" {
+		t.Errorf("Expected /contrib_service/ttl_1d/http2_upper_ref_666, got %q", refUpper)
+	}
 }
 
 func TestResolveFromPrompt_NonExistentFile(t *testing.T) {
@@ -263,5 +279,86 @@ func TestExtractUploadRef_RupioNestedJson(t *testing.T) {
 	ref = extractUploadRef(resURLBody, hdr)
 	if ref != "https://gemini.google.com/upload/photo_001" {
 		t.Errorf("Expected resource.url, got %q", ref)
+	}
+}
+
+func TestResolveFromPromptAndList_QuotedPathsWithSpaces(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "Screenshots")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	pngData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
+	img1 := filepath.Join(subDir, "App UI.png")
+	if err := os.WriteFile(img1, pngData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	img2 := filepath.Join(subDir, "Dark Mode.PNG")
+	if err := os.WriteFile(img2, append(pngData, 0x01), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver := NewImageResolver(tmpDir)
+
+	// 1. Double quotes with spaces in prompt
+	prompt := `Проанализируй @"Screenshots/App UI.png" и скажи вердикт`
+	cleaned, imgs, err := resolver.ResolveFromPromptAndList(prompt, nil)
+	if err != nil {
+		t.Fatalf("ResolveFromPromptAndList failed: %v", err)
+	}
+	if len(imgs) != 1 {
+		t.Fatalf("Expected 1 image, got %d", len(imgs))
+	}
+	if imgs[0].FileName != "App UI.png" {
+		t.Errorf("Expected 'App UI.png', got %s", imgs[0].FileName)
+	}
+	if cleaned != "Проанализируй и скажи вердикт" {
+		t.Errorf("Cleaned prompt mismatch: %q", cleaned)
+	}
+
+	// 2. Single quotes with spaces and uppercase extension in prompt
+	promptSingle := `Взгляни на @'Screenshots/Dark Mode.PNG' внимательно`
+	cleanedSingle, imgsSingle, err := resolver.ResolveFromPromptAndList(promptSingle, nil)
+	if err != nil {
+		t.Fatalf("ResolveFromPromptAndList single failed: %v", err)
+	}
+	if len(imgsSingle) != 1 {
+		t.Fatalf("Expected 1 image, got %d", len(imgsSingle))
+	}
+	if imgsSingle[0].FileName != "Dark Mode.PNG" {
+		t.Errorf("Expected 'Dark Mode.PNG', got %s", imgsSingle[0].FileName)
+	}
+	if cleanedSingle != "Взгляни на внимательно" {
+		t.Errorf("Cleaned prompt mismatch: %q", cleanedSingle)
+	}
+
+	// 3. Explicit paths with quotes and @ prefix
+	explicitList := []string{
+		`@"Screenshots/App UI.png"`,
+		`'Screenshots/Dark Mode.PNG'`,
+	}
+	cleanedExplicit, imgsExplicit, err := resolver.ResolveFromPromptAndList("test explicit", explicitList)
+	if err != nil {
+		t.Fatalf("ResolveFromPromptAndList explicit failed: %v", err)
+	}
+	if len(imgsExplicit) != 2 {
+		t.Fatalf("Expected 2 images, got %d", len(imgsExplicit))
+	}
+	if cleanedExplicit != "test explicit" {
+		t.Errorf("Cleaned prompt mismatch: %q", cleanedExplicit)
+	}
+
+	// 4. Non-existent quoted file should stay in prompt
+	nonExistentPrompt := `Check @"Screenshots/Missing File.png" please`
+	cleanedNE, imgsNE, err := resolver.ResolveFromPromptAndList(nonExistentPrompt, nil)
+	if err != nil {
+		t.Fatalf("Unexpected error for non-existent quoted file: %v", err)
+	}
+	if len(imgsNE) != 0 {
+		t.Fatalf("Expected 0 images, got %d", len(imgsNE))
+	}
+	if !strings.Contains(cleanedNE, `@"Screenshots/Missing File.png"`) {
+		t.Errorf("Cleaned prompt must retain non-existent token, got: %q", cleanedNE)
 	}
 }

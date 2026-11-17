@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
 	"strings"
@@ -15,6 +16,49 @@ var (
 	reThoughtTag           = regexp.MustCompile(`(?is)<thought(?:\s+[^>]*)?>(.*?)</thought>`)
 	reThoughtBlock         = regexp.MustCompile(`(?is):::thought\s*(.*?)(?:\n\s*:::|\s+:::)(?:[\r\n\s]+|$)`)
 )
+
+// thoughtCollector manages deduplication and ordered aggregation of reasoning blocks.
+type thoughtCollector struct {
+	seen  map[string]struct{}
+	parts []string
+}
+
+func newThoughtCollector() *thoughtCollector {
+	return &thoughtCollector{seen: make(map[string]struct{})}
+}
+
+func (tc *thoughtCollector) Add(thought string) {
+	trimmed := strings.TrimSpace(thought)
+	if trimmed == "" {
+		return
+	}
+	if _, exists := tc.seen[trimmed]; exists {
+		return
+	}
+	tc.seen[trimmed] = struct{}{}
+
+	// Check if this new thought extends an existing part or is subsumed
+	for i, existing := range tc.parts {
+		if strings.HasPrefix(trimmed, existing) && len(trimmed) > len(existing) {
+			tc.parts[i] = trimmed
+			return
+		}
+		if strings.Contains(existing, trimmed) {
+			return
+		}
+	}
+
+	tc.parts = append(tc.parts, trimmed)
+}
+
+func (tc *thoughtCollector) String() string {
+	return strings.Join(tc.parts, "\n\n")
+}
+
+func (tc *thoughtCollector) Reset() {
+	tc.seen = make(map[string]struct{})
+	tc.parts = nil
+}
 
 // ParsedResponse holds the consolidated output from StreamGenerate.
 type ParsedResponse struct {
@@ -65,8 +109,9 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 		}
 	}
 
-	var thoughtBuilder strings.Builder
+	tc := newThoughtCollector()
 	var textBuilder strings.Builder
+	var googleAPIError error
 
 	dec := json.NewDecoder(bufReader)
 	for {
@@ -82,11 +127,20 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 		switch v := token.(type) {
 		case float64:
 			// chunk length or numeric meta, ignore
+		case map[string]any:
+			if errVal, exists := v["error"]; exists {
+				if errMap, ok := errVal.(map[string]any); ok {
+					code := errMap["code"]
+					msg := errMap["message"]
+					status := errMap["status"]
+					googleAPIError = fmt.Errorf("google api error %v [%v]: %v", code, status, msg)
+				}
+			}
 		case []any:
 			if rawBytes, err := json.Marshal(v); err == nil {
 				resp.RawChunks = append(resp.RawChunks, string(rawBytes))
 			}
-			processEnvelopeToken(v, resp, &thoughtBuilder, &textBuilder)
+			processEnvelopeToken(v, resp, tc, &textBuilder, &googleAPIError)
 		}
 	}
 
@@ -98,10 +152,7 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 			if len(m) > 1 {
 				t := strings.TrimSpace(m[1])
 				if t != "" {
-					if thoughtBuilder.Len() > 0 {
-						thoughtBuilder.WriteString("\n\n")
-					}
-					thoughtBuilder.WriteString(t)
+					tc.Add(t)
 				}
 			}
 		}
@@ -113,10 +164,7 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 			if len(m) > 1 {
 				t := strings.TrimSpace(m[1])
 				if t != "" {
-					if thoughtBuilder.Len() > 0 {
-						thoughtBuilder.WriteString("\n\n")
-					}
-					thoughtBuilder.WriteString(t)
+					tc.Add(t)
 				}
 			}
 		}
@@ -128,10 +176,7 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 		idx := strings.Index(fullText, ":::thought")
 		thoughtPart := strings.TrimSpace(strings.TrimPrefix(fullText[idx:], ":::thought"))
 		if thoughtPart != "" {
-			if thoughtBuilder.Len() > 0 {
-				thoughtBuilder.WriteString("\n\n")
-			}
-			thoughtBuilder.WriteString(thoughtPart)
+			tc.Add(thoughtPart)
 		}
 		fullText = strings.TrimSpace(fullText[:idx])
 	}
@@ -141,25 +186,25 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 		idx := strings.Index(fullText, "<thought>")
 		thoughtPart := strings.TrimSpace(strings.TrimPrefix(fullText[idx:], "<thought>"))
 		if thoughtPart != "" {
-			if thoughtBuilder.Len() > 0 {
-				thoughtBuilder.WriteString("\n\n")
-			}
-			thoughtBuilder.WriteString(thoughtPart)
+			tc.Add(thoughtPart)
 		}
 		fullText = strings.TrimSpace(fullText[:idx])
 	}
 
-	resp.Thought = strings.TrimSpace(thoughtBuilder.String())
+	resp.Thought = tc.String()
 	resp.Text = strings.TrimSpace(fullText)
 
 	if resp.Text == "" && resp.Thought == "" {
+		if googleAPIError != nil {
+			return nil, googleAPIError
+		}
 		return nil, ErrEmptyParsedResponse
 	}
 
 	return resp, nil
 }
 
-func processEnvelopeToken(envelope []any, resp *ParsedResponse, thoughtB *strings.Builder, textB *strings.Builder) {
+func processEnvelopeToken(envelope []any, resp *ParsedResponse, tc *thoughtCollector, textB *strings.Builder, apiErr *error) {
 	for _, itemAny := range envelope {
 		item, ok := itemAny.([]any)
 		if !ok || len(item) < 3 {
@@ -168,6 +213,20 @@ func processEnvelopeToken(envelope []any, resp *ParsedResponse, thoughtB *string
 
 		rpcName, _ := item[0].(string)
 		if rpcName != "wrb.fr" {
+			if rpcName == "er" {
+				if innerStr, ok := item[2].(string); ok && innerStr != "" {
+					var errMap map[string]any
+					if err := json.Unmarshal([]byte(innerStr), &errMap); err == nil {
+						if errVal, exists := errMap["error"]; exists {
+							if em, ok := errVal.(map[string]any); ok {
+								if apiErr != nil && *apiErr == nil {
+									*apiErr = fmt.Errorf("google api error %v [%v]: %v", em["code"], em["status"], em["message"])
+								}
+							}
+						}
+					}
+				}
+			}
 			continue
 		}
 
@@ -178,14 +237,25 @@ func processEnvelopeToken(envelope []any, resp *ParsedResponse, thoughtB *string
 
 		var innerData []any
 		if err := json.Unmarshal([]byte(innerStr), &innerData); err != nil {
+			// Check if innerStr is an error map
+			var errMap map[string]any
+			if err2 := json.Unmarshal([]byte(innerStr), &errMap); err2 == nil {
+				if errVal, exists := errMap["error"]; exists {
+					if em, ok := errVal.(map[string]any); ok {
+						if apiErr != nil && *apiErr == nil {
+							*apiErr = fmt.Errorf("google api error %v [%v]: %v", em["code"], em["status"], em["message"])
+						}
+					}
+				}
+			}
 			continue
 		}
 
-		extractFromInnerData(innerData, resp, thoughtB, textB)
+		extractFromInnerData(innerData, resp, tc, textB)
 	}
 }
 
-func extractFromInnerData(inner []any, resp *ParsedResponse, thoughtB *strings.Builder, textB *strings.Builder) {
+func extractFromInnerData(inner []any, resp *ParsedResponse, tc *thoughtCollector, textB *strings.Builder) {
 	// 1. Conversation ID & Response ID from inner[1]
 	if len(inner) > 1 {
 		if convInfo, ok := inner[1].([]any); ok {
@@ -234,7 +304,7 @@ func extractFromInnerData(inner []any, resp *ParsedResponse, thoughtB *strings.B
 				}
 
 				for i := 2; i < len(cand); i++ {
-					inspectThinkingTrace(cand[i], thoughtB)
+					inspectThinkingTrace(cand[i], tc)
 				}
 			}
 
@@ -242,7 +312,7 @@ func extractFromInnerData(inner []any, resp *ParsedResponse, thoughtB *strings.B
 			for cIdx := 1; cIdx < len(candidates); cIdx++ {
 				if cand, ok := candidates[cIdx].([]any); ok {
 					for i := 2; i < len(cand); i++ {
-						inspectThinkingTrace(cand[i], thoughtB)
+						inspectThinkingTrace(cand[i], tc)
 					}
 				}
 			}
@@ -252,12 +322,12 @@ func extractFromInnerData(inner []any, resp *ParsedResponse, thoughtB *strings.B
 	// Check any additional root slots for thought traces or extra metadata
 	if len(inner) > 5 {
 		for i := 5; i < len(inner); i++ {
-			inspectThinkingTrace(inner[i], thoughtB)
+			inspectThinkingTrace(inner[i], tc)
 		}
 	}
 }
 
-func inspectThinkingTrace(val any, thoughtB *strings.Builder) {
+func inspectThinkingTrace(val any, tc *thoughtCollector) {
 	if val == nil {
 		return
 	}
@@ -267,48 +337,30 @@ func inspectThinkingTrace(val any, thoughtB *strings.Builder) {
 		// If string contains thinking indicator
 		trimmed := strings.TrimSpace(v)
 		if strings.HasPrefix(trimmed, "Thinking Process:") || strings.Contains(v, "Thinking Trace") {
-			if thoughtB.Len() > 0 {
-				thoughtB.WriteString("\n\n")
-			}
-			thoughtB.WriteString(v)
+			tc.Add(v)
 		} else if strings.HasPrefix(trimmed, ":::thought") && strings.HasSuffix(trimmed, ":::") {
 			content := strings.TrimPrefix(trimmed, ":::thought")
 			content = strings.TrimSuffix(content, ":::")
-			content = strings.TrimSpace(content)
-			if content != "" {
-				if thoughtB.Len() > 0 {
-					thoughtB.WriteString("\n\n")
-				}
-				thoughtB.WriteString(content)
-			}
+			tc.Add(content)
 		} else if strings.HasPrefix(trimmed, "<thought>") && strings.HasSuffix(trimmed, "</thought>") {
 			content := strings.TrimPrefix(trimmed, "<thought>")
 			content = strings.TrimSuffix(content, "</thought>")
-			content = strings.TrimSpace(content)
-			if content != "" {
-				if thoughtB.Len() > 0 {
-					thoughtB.WriteString("\n\n")
-				}
-				thoughtB.WriteString(content)
-			}
+			tc.Add(content)
 		}
 	case []any:
 		for _, item := range v {
-			inspectThinkingTrace(item, thoughtB)
+			inspectThinkingTrace(item, tc)
 		}
 	case map[string]any:
 		found := false
 		for _, key := range []string{"thought", "thinking", "reasoning", "thought_trace"} {
 			if thoughtVal, exists := v[key]; exists {
 				if tStr, ok := thoughtVal.(string); ok && tStr != "" {
-					if thoughtB.Len() > 0 {
-						thoughtB.WriteString("\n\n")
-					}
-					thoughtB.WriteString(tStr)
+					tc.Add(tStr)
 					found = true
 					break
 				} else {
-					inspectThinkingTrace(thoughtVal, thoughtB)
+					inspectThinkingTrace(thoughtVal, tc)
 					found = true
 				}
 			}
@@ -316,19 +368,19 @@ func inspectThinkingTrace(val any, thoughtB *strings.Builder) {
 		if !found {
 			for _, val := range v {
 				if _, isMap := val.(map[string]any); isMap {
-					inspectThinkingTrace(val, thoughtB)
+					inspectThinkingTrace(val, tc)
 				} else if _, isArr := val.([]any); isArr {
-					inspectThinkingTrace(val, thoughtB)
+					inspectThinkingTrace(val, tc)
 				}
 			}
 		}
 	}
 }
 
-func extractGeneric(items []any, resp *ParsedResponse, thoughtB *strings.Builder, textB *strings.Builder) {
+func extractGeneric(items []any, resp *ParsedResponse, tc *thoughtCollector, textB *strings.Builder) {
 	for _, item := range items {
 		if arr, ok := item.([]any); ok {
-			extractGeneric(arr, resp, thoughtB, textB)
+			extractGeneric(arr, resp, tc, textB)
 		} else if str, ok := item.(string); ok {
 			if strings.HasPrefix(str, "c_") && resp.ConversationID == "" {
 				resp.ConversationID = str

@@ -82,29 +82,49 @@ func (s *SessionManager) harvestCookiesFromSafariLocked(ctx context.Context) err
 	if err != nil {
 		return fmt.Errorf("resolve user home directory: %w", err)
 	}
-	safariCookiePath := filepath.Join(homeDir, "Library", "Containers", "com.apple.Safari", "Data", "Library", "Cookies", "Cookies.binarycookies")
 
-	// Check existence and permissions via Stat
-	if fi, err := os.Stat(safariCookiePath); err != nil {
-		if errors.Is(err, os.ErrPermission) || strings.Contains(strings.ToLower(err.Error()), "permission denied") || strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
-			return fmt.Errorf("access to Safari cookies denied by macOS TCC (Full Disk Access required): %w. Please grant Full Disk Access to your terminal or application in System Settings -> Privacy & Security -> Full Disk Access", err)
-		}
-		if os.IsNotExist(err) {
-			return fmt.Errorf("safari cookies not found at %s: %w", safariCookiePath, err)
-		}
-		return fmt.Errorf("stat safari cookies: %w", err)
-	} else if fi.Size() == 0 {
-		return fmt.Errorf("safari cookies file is empty at %s", safariCookiePath)
+	candidatePaths := []string{
+		filepath.Join(homeDir, "Library", "Containers", "com.apple.Safari", "Data", "Library", "Cookies", "Cookies.binarycookies"),
+		filepath.Join(homeDir, "Library", "Cookies", "Cookies.binarycookies"),
 	}
 
-	// Verify read access via Open
-	if f, err := os.Open(safariCookiePath); err != nil {
-		if errors.Is(err, os.ErrPermission) || strings.Contains(strings.ToLower(err.Error()), "permission denied") || strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
-			return fmt.Errorf("access to Safari cookies denied by macOS TCC (Full Disk Access required): %w. Please grant Full Disk Access to your terminal or application in System Settings -> Privacy & Security -> Full Disk Access", err)
+	var foundPath string
+	var lastErr error
+
+	for _, p := range candidatePaths {
+		fi, err := os.Stat(p)
+		if err != nil {
+			if errors.Is(err, os.ErrPermission) || strings.Contains(strings.ToLower(err.Error()), "permission denied") || strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+				return fmt.Errorf("access to Safari cookies denied by macOS TCC (Full Disk Access required): %w. Please grant Full Disk Access to your terminal or application in System Settings -> Privacy & Security -> Full Disk Access", err)
+			}
+			lastErr = err
+			continue
 		}
-		return fmt.Errorf("open safari cookies file: %w", err)
-	} else {
-		_ = f.Close()
+		if fi.Size() == 0 {
+			lastErr = fmt.Errorf("safari cookies file is empty at %s", p)
+			continue
+		}
+
+		// Verify read access via Open
+		if f, err := os.Open(p); err != nil {
+			if errors.Is(err, os.ErrPermission) || strings.Contains(strings.ToLower(err.Error()), "permission denied") || strings.Contains(strings.ToLower(err.Error()), "operation not permitted") {
+				return fmt.Errorf("access to Safari cookies denied by macOS TCC (Full Disk Access required): %w. Please grant Full Disk Access to your terminal or application in System Settings -> Privacy & Security -> Full Disk Access", err)
+			}
+			lastErr = fmt.Errorf("open safari cookies file: %w", err)
+			continue
+		} else {
+			_ = f.Close()
+		}
+
+		foundPath = p
+		break
+	}
+
+	if foundPath == "" {
+		if lastErr != nil {
+			return fmt.Errorf("safari cookies not found: %w", lastErr)
+		}
+		return errors.New("safari cookies file not found in candidate paths")
 	}
 
 	pyScript := fmt.Sprintf(`
@@ -153,7 +173,7 @@ except PermissionError as e:
 except Exception as e:
     sys.stderr.write(f"EXTRACTION_ERROR: {e}\n")
     sys.exit(4)
-`, safariCookiePath)
+`, foundPath)
 
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, "python3", "-c", pyScript)

@@ -388,3 +388,190 @@ func TestBridgeGenerate_DefaultTimeout(t *testing.T) {
 		t.Errorf("unexpected return val: %s", val)
 	}
 }
+
+func TestBridgeGenerate_CSRFTokenInjection(t *testing.T) {
+	srv, sm := setupMockCDPServer(t, func(conn *websocket.Conn) {
+		var req cdpEvalRequest
+		if err := conn.ReadJSON(&req); err != nil {
+			return
+		}
+
+		expr, _ := req.Params["expression"].(string)
+		if !strings.Contains(expr, "const liveAt = window.WIZ_global_data?.SNlM0e || '';") {
+			t.Errorf("expression missing liveAt declaration: %s", expr)
+		}
+		if !strings.Contains(expr, "new URLSearchParams(bodyStr)") {
+			t.Errorf("expression missing URLSearchParams parsing: %s", expr)
+		}
+		if !strings.Contains(expr, "parsed.set('at', liveAt)") {
+			t.Errorf("expression missing parsed.set('at', liveAt): %s", expr)
+		}
+		if !strings.Contains(expr, "body: bodyStr") {
+			t.Errorf("expression missing body: bodyStr: %s", expr)
+		}
+
+		resp := cdpEvalResponse{
+			ID: 201,
+		}
+		resp.Result.Result.Type = "string"
+		resp.Result.Result.Value = ")]}'\n[[\"wrb.fr\",null,\"csrf_ok\"]]"
+		_ = conn.WriteJSON(resp)
+	})
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	val, err := sm.BridgeGenerate(ctx, BridgeGenerateParams{
+		Body: "at=old_token&f.req=test",
+	})
+	if err != nil {
+		t.Fatalf("BridgeGenerate failed: %v", err)
+	}
+	if !strings.Contains(val, "csrf_ok") {
+		t.Errorf("unexpected return val: %s", val)
+	}
+}
+
+func TestBridgeGenerate_ConcurrencySemaphore(t *testing.T) {
+	hold := make(chan struct{})
+	inFlight := make(chan struct{}, 10)
+
+	srv, sm := setupMockCDPServer(t, func(conn *websocket.Conn) {
+		inFlight <- struct{}{}
+		var req cdpEvalRequest
+		_ = conn.ReadJSON(&req)
+		<-hold
+		resp := cdpEvalResponse{
+			ID: 201,
+		}
+		resp.Result.Result.Type = "string"
+		resp.Result.Result.Value = "ok"
+		_ = conn.WriteJSON(resp)
+	})
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Launch 3 requests (capacity of semaphore)
+	errCh := make(chan error, 4)
+	for i := 0; i < 3; i++ {
+		go func() {
+			_, err := sm.BridgeGenerate(ctx, BridgeGenerateParams{Body: "req"})
+			errCh <- err
+		}()
+	}
+
+	// Wait until all 3 slots are occupied
+	for i := 0; i < 3; i++ {
+		select {
+		case <-inFlight:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for 3 concurrent requests to start")
+		}
+	}
+
+	// 4th request with short context timeout should fail because semaphore is full
+	shortCtx, shortCancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer shortCancel()
+	_, fourthErr := sm.BridgeGenerate(shortCtx, BridgeGenerateParams{Body: "req4"})
+	if fourthErr == nil {
+		t.Error("expected 4th concurrent request to time out waiting for semaphore slot")
+	}
+
+	// Release hold to allow the 3 requests to finish
+	close(hold)
+	for i := 0; i < 3; i++ {
+		if err := <-errCh; err != nil {
+			t.Errorf("concurrent request %d failed: %v", i, err)
+		}
+	}
+}
+
+func TestResolveGeminiTargetURL_Priority(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targets := []map[string]any{
+			{
+				"type":                 "page",
+				"url":                  "https://gemini.google.com/about",
+				"webSocketDebuggerUrl": "ws://example.com/about",
+			},
+			{
+				"type":                 "page",
+				"url":                  "https://gemini.google.com/app",
+				"webSocketDebuggerUrl": "ws://example.com/app",
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(targets)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	wsURL, err := resolveGeminiTargetURL(ctx, srv.URL)
+	if err != nil {
+		t.Fatalf("resolveGeminiTargetURL failed: %v", err)
+	}
+	if wsURL != "ws://example.com/app" {
+		t.Errorf("expected ws://example.com/app to be prioritized, got %q", wsURL)
+	}
+}
+
+func TestResolveWebSocketDebuggerURL_Fallback(t *testing.T) {
+	t.Run("FallbackToAnyPageTarget", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			targets := []map[string]any{
+				{
+					"type":                 "service_worker",
+					"url":                  "https://accounts.google.com/sw.js",
+					"webSocketDebuggerUrl": "ws://example.com/sw",
+				},
+				{
+					"type":                 "page",
+					"url":                  "https://news.google.com",
+					"webSocketDebuggerUrl": "ws://example.com/news",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(targets)
+		}))
+		defer srv.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		wsURL, err := resolveWebSocketDebuggerURL(ctx, srv.URL)
+		if err != nil {
+			t.Fatalf("resolveWebSocketDebuggerURL fallback failed: %v", err)
+		}
+		if wsURL != "ws://example.com/news" {
+			t.Errorf("expected ws://example.com/news, got %q", wsURL)
+		}
+	})
+
+	t.Run("NoPageTargetsFails", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			targets := []map[string]any{
+				{
+					"type":                 "service_worker",
+					"url":                  "https://accounts.google.com/sw.js",
+					"webSocketDebuggerUrl": "ws://example.com/sw",
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(targets)
+		}))
+		defer srv.Close()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		_, err := resolveWebSocketDebuggerURL(ctx, srv.URL)
+		if err == nil {
+			t.Fatal("expected error when no page targets exist, got nil")
+		}
+	})
+}

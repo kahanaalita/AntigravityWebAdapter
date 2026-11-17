@@ -357,3 +357,58 @@ window.WIZ_global_data = {
 
 	wg.Wait()
 }
+
+func TestCookieRotator_StartupRotation(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookies.json")
+	sm, err := NewSessionManager(cookieFile, "")
+	if err != nil {
+		t.Fatalf("NewSessionManager failed: %v", err)
+	}
+
+	// Interval is 24 hours, but Start should immediately trigger initial rotation
+	rotator := NewCookieRotator(sm, 24*time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	rotator.Start(ctx)
+	time.Sleep(50 * time.Millisecond)
+	rotator.Stop()
+}
+
+func TestSafariCookies_DirectPathFallback(t *testing.T) {
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+
+	// Create ONLY direct path: ~/Library/Cookies/Cookies.binarycookies
+	directDir := filepath.Join(fakeHome, "Library", "Cookies")
+	if err := os.MkdirAll(directDir, 0755); err != nil {
+		t.Fatalf("mkdir direct cookies dir failed: %v", err)
+	}
+	cookieFile := filepath.Join(directDir, "Cookies.binarycookies")
+	// Write dummy data (non-zero size so stat succeeds)
+	if err := os.WriteFile(cookieFile, []byte("dummy binary cookie content"), 0644); err != nil {
+		t.Fatalf("write direct cookie file failed: %v", err)
+	}
+
+	tmpDir := t.TempDir()
+	storeFile := filepath.Join(tmpDir, "store.json")
+	sm, err := NewSessionManager(storeFile, "")
+	if err != nil {
+		t.Fatalf("NewSessionManager failed: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// harvestCookiesFromSafariLocked should find the direct path file and attempt extraction
+	err = sm.harvestCookiesFromSafariLocked(ctx)
+	if err == nil {
+		t.Fatal("expected python extraction error on dummy content, got nil")
+	}
+	// The error must NOT be "safari cookies not found" or "no such file or directory",
+	// but rather the python script error indicating the file was opened and parsed
+	if strings.Contains(err.Error(), "no such file or directory") || strings.Contains(err.Error(), "not found") {
+		t.Errorf("expected direct file to be discovered, but got file not found error: %v", err)
+	}
+}

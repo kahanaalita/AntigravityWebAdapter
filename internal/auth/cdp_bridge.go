@@ -23,6 +23,15 @@ type BridgeGenerateParams struct {
 
 // BridgeGenerate executes the Gemini Web RPC directly in the authenticated browser context via CDP Runtime.evaluate.
 func (s *SessionManager) BridgeGenerate(ctx context.Context, params BridgeGenerateParams) (string, error) {
+	if s.cdpSem != nil {
+		select {
+		case s.cdpSem <- struct{}{}:
+			defer func() { <-s.cdpSem }()
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+
 	endpoint := s.cdpURL
 	if endpoint == "" {
 		endpoint = "http://127.0.0.1:9222"
@@ -57,13 +66,27 @@ func (s *SessionManager) BridgeGenerate(ctx context.Context, params BridgeGenera
 	}
 
 	jsExpr := fmt.Sprintf(`(async () => {
-		const at = window.WIZ_global_data?.SNlM0e || '';
+		const liveAt = window.WIZ_global_data?.SNlM0e || '';
 		const bl = %q || window.WIZ_global_data?.cfb2h || '';
 		const sid = %q || window.WIZ_global_data?.FdrFJe || '';
 		const extHdr = %q;
 		const reqID = Math.floor(100000 + Math.random() * 900000);
-		const url = 'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=' + bl + '&_reqid=' + reqID + '&rt=c&f.sid=' + sid;
-		
+		let url = 'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=' + encodeURIComponent(bl) + '&_reqid=' + reqID + '&rt=c';
+		if (sid) {
+			url += '&f.sid=' + encodeURIComponent(sid);
+		}
+
+		let bodyStr = %s;
+		if (liveAt) {
+			try {
+				const parsed = new URLSearchParams(bodyStr);
+				parsed.set('at', liveAt);
+				bodyStr = parsed.toString();
+			} catch (e) {
+				// fallback to original bodyStr on parsing failure
+			}
+		}
+
 		const headers = {
 			'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
 			'X-Same-Domain': '1'
@@ -75,7 +98,7 @@ func (s *SessionManager) BridgeGenerate(ctx context.Context, params BridgeGenera
 		const r = await fetch(url, {
 			method: 'POST',
 			headers: headers,
-			body: %s,
+			body: bodyStr,
 			credentials: 'include'
 		});
 
@@ -148,7 +171,8 @@ func (s *SessionManager) BridgeGenerate(ctx context.Context, params BridgeGenera
 	}
 }
 
-// resolveGeminiTargetURL strictly finds the gemini.google.com tab in Chrome via CDP.
+// resolveGeminiTargetURL strictly finds the gemini.google.com tab in Chrome via CDP,
+// giving priority to the active app tab (gemini.google.com/app).
 func resolveGeminiTargetURL(ctx context.Context, endpoint string) (string, error) {
 	if strings.HasPrefix(endpoint, "ws://") || strings.HasPrefix(endpoint, "wss://") {
 		return endpoint, nil
@@ -178,6 +202,14 @@ func resolveGeminiTargetURL(ctx context.Context, endpoint string) (string, error
 		return "", fmt.Errorf("decode cdp targets: %w", err)
 	}
 
+	// 1. Highest priority: active app page gemini.google.com/app
+	for _, t := range targets {
+		if t.Type == "page" && strings.Contains(t.URL, "gemini.google.com/app") && t.WebSocketDebuggerURL != "" {
+			return t.WebSocketDebuggerURL, nil
+		}
+	}
+
+	// 2. Secondary priority: any gemini.google.com page
 	for _, t := range targets {
 		if t.Type == "page" && strings.Contains(t.URL, "gemini.google.com") && t.WebSocketDebuggerURL != "" {
 			return t.WebSocketDebuggerURL, nil

@@ -65,11 +65,14 @@ func (c *Client) Generate(ctx context.Context, req StreamGenerateRequest) (*Pars
 
 	resp, err := c.doGenerate(callCtx, req, false)
 	if err != nil && (strings.Contains(err.Error(), "401") || strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "CSRF") || strings.Contains(err.Error(), "302")) {
-		// Session might be expired, auto harvest fresh cookies and retry
-		_ = c.session.AutoHarvest(callCtx)
-		_, refreshErr := c.session.GetWizData(callCtx, true)
-		if refreshErr == nil {
-			return c.doGenerate(callCtx, req, true)
+		// Do not retry on explicit Google API errors, rate limits, or browser 429/403
+		if !strings.Contains(err.Error(), "google api error") && !strings.Contains(err.Error(), "RESOURCE_EXHAUSTED") && !strings.Contains(err.Error(), "HTTP 429") && !strings.Contains(err.Error(), "429") && !strings.Contains(err.Error(), "HTTP 403") {
+			// Session might be expired, auto harvest fresh cookies and retry
+			_ = c.session.AutoHarvest(callCtx)
+			_, refreshErr := c.session.GetWizData(callCtx, true)
+			if refreshErr == nil {
+				return c.doGenerate(callCtx, req, true)
+			}
 		}
 	}
 
@@ -122,6 +125,16 @@ func (c *Client) doGenerate(ctx context.Context, req StreamGenerateRequest, isRe
 					})
 				}
 				return parsed, nil
+			}
+			// If parser returned explicit Google API / quota error, do not fallback to TLS client
+			if parseErr != nil && (strings.Contains(parseErr.Error(), "google api error") || strings.Contains(parseErr.Error(), "RESOURCE_EXHAUSTED") || strings.Contains(parseErr.Error(), "429")) {
+				return nil, parseErr
+			}
+		} else {
+			// If CDP error contains HTTP 429/403 or google api error, do not fallback to TLS client
+			errMsg := bridgeErr.Error()
+			if strings.Contains(errMsg, "HTTP 429") || strings.Contains(errMsg, "HTTP 403") || strings.Contains(errMsg, "google api error") || strings.Contains(errMsg, "429") || strings.Contains(errMsg, "403") {
+				return nil, bridgeErr
 			}
 		}
 	}
