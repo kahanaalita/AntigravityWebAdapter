@@ -20,12 +20,12 @@ func TestBuildExtensionHeader(t *testing.T) {
 		t.Errorf("hdrLow mismatch: %s", hdrLow)
 	}
 
-	hdrHigh := BuildExtensionHeader("argon-4", config.TierHigh)
+	hdrHigh := BuildExtensionHeader("neon-4", config.TierHigh)
 	var arrHigh []any
 	if err := json.Unmarshal([]byte(hdrHigh), &arrHigh); err != nil {
 		t.Fatalf("Unmarshal hdrHigh failed: %v", err)
 	}
-	if arrHigh[4] != "argon-4" || arrHigh[7] != float64(3) {
+	if arrHigh[4] != "neon-4" || arrHigh[7] != float64(3) {
 		t.Errorf("hdrHigh mismatch: %s", hdrHigh)
 	}
 }
@@ -553,3 +553,159 @@ func TestParseStream_MultiChunkThoughtPrefixExtension(t *testing.T) {
 		t.Errorf("Expected extended thought %q, got %q", expectedThought, resp.Thought)
 	}
 }
+
+func TestParseStream_CodeExecutionDeltaChunks(t *testing.T) {
+	// Chunk 1: Model writes python code to execute
+	inner1 := []any{
+		nil,
+		[]any{"c_code_01", "r_code_01"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_code_01",
+				[]any{"Let's compute the result:\n```python\nprint(17 * 23)\n```\n"},
+			},
+		},
+	}
+	bytes1, _ := json.Marshal(inner1)
+	env1, _ := json.Marshal([][]any{{"wrb.fr", nil, string(bytes1)}})
+
+	// Chunk 2: Code Execution / Grounding output arrives as a new delta fragment (not prefix of Chunk 1)
+	inner2 := []any{
+		nil,
+		[]any{"c_code_01", "r_code_01"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_code_01",
+				[]any{"Output:\n```\n391\n```\n"},
+			},
+		},
+	}
+	bytes2, _ := json.Marshal(inner2)
+	env2, _ := json.Marshal([][]any{{"wrb.fr", nil, string(bytes2)}})
+
+	// Chunk 3: Final response text extending Chunk 2
+	inner3 := []any{
+		nil,
+		[]any{"c_code_01", "r_code_01"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_code_01",
+				[]any{"Output:\n```\n391\n```\nTherefore, 17 * 23 = 391."},
+			},
+		},
+	}
+	bytes3, _ := json.Marshal(inner3)
+	env3, _ := json.Marshal([][]any{{"wrb.fr", nil, string(bytes3)}})
+
+	stream := ")]}'\n" +
+		"100\n" + string(env1) + "\n" +
+		"100\n" + string(env2) + "\n" +
+		"100\n" + string(env3) + "\n"
+
+	resp, err := ParseStream(strings.NewReader(stream))
+	if err != nil {
+		t.Fatalf("ParseStream failed: %v", err)
+	}
+
+	// Verify that text from Chunk 1 was NOT erased by Chunk 2 and Chunk 3
+	if !strings.Contains(resp.Text, "Let's compute the result:") {
+		t.Errorf("Chunk 1 text was lost or overwritten: %q", resp.Text)
+	}
+	if !strings.Contains(resp.Text, "```python\nprint(17 * 23)\n```") {
+		t.Errorf("Code block from Chunk 1 was lost: %q", resp.Text)
+	}
+	if !strings.Contains(resp.Text, "Output:\n```\n391\n```") {
+		t.Errorf("Execution output from Chunk 2 was lost: %q", resp.Text)
+	}
+	if !strings.Contains(resp.Text, "Therefore, 17 * 23 = 391.") {
+		t.Errorf("Conclusion from Chunk 3 was lost: %q", resp.Text)
+	}
+	if resp.Truncated {
+		t.Errorf("Complete response should not be marked truncated")
+	}
+}
+
+func TestParseStream_PrematureEOF_Truncated(t *testing.T) {
+	// Valid Chunk 1
+	inner1 := []any{
+		nil,
+		[]any{"c_trunc_01", "r_trunc_01"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_trunc_01",
+				[]any{"Частичный ответ перед разрывом соединения."},
+			},
+		},
+	}
+	bytes1, _ := json.Marshal(inner1)
+	env1, _ := json.Marshal([][]any{{"wrb.fr", nil, string(bytes1)}})
+
+	// Incomplete/broken Chunk 2 simulating abrupt socket termination mid-JSON
+	brokenStream := ")]}'\n" +
+		"100\n" + string(env1) + "\n" +
+		"200\n[[\"wrb.fr\",null,\"[\"cut off abruptly"
+
+	resp, err := ParseStream(strings.NewReader(brokenStream))
+	if err != nil {
+		t.Fatalf("ParseStream should recover partial text on premature EOF, got error: %v", err)
+	}
+
+	if !strings.Contains(resp.Text, "Частичный ответ перед разрывом соединения.") {
+		t.Errorf("Expected partial text, got: %q", resp.Text)
+	}
+	if !resp.Truncated {
+		t.Errorf("Expected Truncated = true for broken stream")
+	}
+	if resp.Warning == "" {
+		t.Errorf("Expected non-empty Warning for truncated stream")
+	}
+
+	formatted := resp.FormattedOutput()
+	if !strings.Contains(formatted, "Предупреждение:") {
+		t.Errorf("Formatted output should contain warning alert: %s", formatted)
+	}
+}
+
+func TestParseStream_UnclosedThoughtBlock_Truncated(t *testing.T) {
+	// Response ended while model was still generating :::thought block
+	inner := []any{
+		nil,
+		[]any{"c_unclosed_01", "r_unclosed_01"},
+		nil,
+		nil,
+		[]any{
+			[]any{
+				"rc_unclosed_01",
+				[]any{":::thought\nГенерирую рассуждения, но связь прервалась"},
+			},
+		},
+	}
+	bytes, _ := json.Marshal(inner)
+	env, _ := json.Marshal([][]any{{"wrb.fr", nil, string(bytes)}})
+
+	stream := ")]}'\n" + string(env) + "\n"
+
+	resp, err := ParseStream(strings.NewReader(stream))
+	if err != nil {
+		t.Fatalf("ParseStream failed: %v", err)
+	}
+
+	if !resp.Truncated {
+		t.Errorf("Expected Truncated = true for unclosed thought block")
+	}
+	if !strings.Contains(resp.Thought, "Генерирую рассуждения") {
+		t.Errorf("Expected thought to capture partial reasoning, got: %q", resp.Thought)
+	}
+	if !strings.Contains(resp.Warning, "reasoning trace") {
+		t.Errorf("Expected warning about reasoning trace, got: %q", resp.Warning)
+	}
+}
+

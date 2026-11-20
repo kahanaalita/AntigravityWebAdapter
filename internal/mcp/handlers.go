@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
+	"agy-gemini-web-mcp/internal/auth"
 	"agy-gemini-web-mcp/internal/config"
 	"agy-gemini-web-mcp/internal/geminiweb"
 	"agy-gemini-web-mcp/internal/media"
@@ -38,8 +40,8 @@ func (h *ServerHandler) Register(s *server.MCPServer) {
 	s.AddTool(
 		mcp.NewTool(
 			"gemini_pro_web_ask",
-			mcp.WithDescription("Unified invocation of Google AI Pro web models (Hydrogen 4 and Argon 4) with granular reasoning effort and multimodal image upload."),
-			mcp.WithString("model", mcp.Required(), mcp.Description("Target model: 'hydrogen-4' or 'argon-4' (or aliases)")),
+			mcp.WithDescription("Unified invocation of Google AI Pro web models (Hydrogen 4 and Neon 4) with granular reasoning effort and multimodal image upload."),
+			mcp.WithString("model", mcp.Required(), mcp.Description("Target model: 'hydrogen-4' or 'neon-4' (or aliases)")),
 			mcp.WithString("prompt", mcp.Required(), mcp.Description("User query or instructions")),
 			mcp.WithString("effort", mcp.Description("Reasoning effort level: 'low', 'middle', 'medium', or 'high'")),
 			mcp.WithArray("images", mcp.Description("List of image paths, data URIs, or '@clipboard'")),
@@ -69,11 +71,16 @@ func (h *ServerHandler) Register(s *server.MCPServer) {
 	registerAtomicTool("hydrogen_middle", "hydrogen-4", "middle", "Hydrogen 4 with middle reasoning effort (balanced analysis, 20m streaming timeout, 5m idle)")
 	registerAtomicTool("hydrogen_high", "hydrogen-4", "high", "Hydrogen 4 with high reasoning effort (deep analysis, 20m streaming timeout, 5m idle)")
 
-	registerAtomicTool("argon_low", "argon-4", "low", "Argon 4 with low reasoning effort (fast response, 20m streaming timeout, 5m idle)")
-	registerAtomicTool("argon_medium", "argon-4", "medium", "Argon 4 with medium reasoning effort (balanced synthesis, 20m streaming timeout, 5m idle)")
-	registerAtomicTool("argon_high", "argon-4", "high", "Argon 4 with high reasoning effort (deep synthesis, 20m streaming timeout, 5m idle)")
+	registerAtomicTool("neon_low", "neon-4", "low", "Neon 4 with low reasoning effort (fast response, 20m streaming timeout, 5m idle)")
+	registerAtomicTool("neon_medium", "neon-4", "medium", "Neon 4 with medium reasoning effort (balanced synthesis, 20m streaming timeout, 5m idle)")
+	registerAtomicTool("neon_high", "neon-4", "high", "Neon 4 with high reasoning effort (deep synthesis, 20m streaming timeout, 5m idle)")
 
-	// 3. MCP Prompts: hydrogen and argon
+	// Backward compatibility aliases for argon
+	registerAtomicTool("argon_low", "neon-4", "low", "Argon 4 alias (migrated to Neon 4 with low reasoning effort)")
+	registerAtomicTool("argon_medium", "neon-4", "medium", "Argon 4 alias (migrated to Neon 4 with medium reasoning effort)")
+	registerAtomicTool("argon_high", "neon-4", "high", "Argon 4 alias (migrated to Neon 4 with high reasoning effort)")
+
+	// 3. MCP Prompts: hydrogen and neon
 	s.AddPrompt(
 		mcp.NewPrompt(
 			"hydrogen",
@@ -89,14 +96,14 @@ func (h *ServerHandler) Register(s *server.MCPServer) {
 
 	s.AddPrompt(
 		mcp.NewPrompt(
-			"argon",
-			mcp.WithPromptDescription("Prompt template for Argon 4 (Google AI Pro Web)"),
-			mcp.WithArgument("prompt", mcp.RequiredArgument(), mcp.ArgumentDescription("Prompt text for Argon 4")),
+			"neon",
+			mcp.WithPromptDescription("Prompt template for Neon 4 (Google AI Pro Web)"),
+			mcp.WithArgument("prompt", mcp.RequiredArgument(), mcp.ArgumentDescription("Prompt text for Neon 4")),
 			mcp.WithArgument("effort", mcp.ArgumentDescription("Reasoning effort: low | medium | high (default: medium)")),
 			mcp.WithArgument("image_paths", mcp.ArgumentDescription("Comma-separated list of image paths or @clipboard")),
 		),
 		func(ctx context.Context, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-			return h.handlePromptTemplate("argon-4", "medium", req)
+			return h.handlePromptTemplate("neon-4", "medium", req)
 		},
 	)
 }
@@ -185,6 +192,9 @@ func (h *ServerHandler) executeAsk(ctx context.Context, rawModel, rawEffort stri
 	if len(resolvedImages) > 0 {
 		attList, err := h.scotty.UploadImages(ctx, resolvedImages)
 		if err != nil {
+			if errors.Is(err, geminiweb.ErrAuthenticationRequired) || isAuthError(err) {
+				return mcp.NewToolResultError(FormatAuthRequiredHelp(err)), nil
+			}
 			return mcp.NewToolResultError(fmt.Sprintf("scotty image upload: %v", err)), nil
 		}
 		genReq.Attachments = attList
@@ -193,11 +203,55 @@ func (h *ServerHandler) executeAsk(ctx context.Context, rawModel, rawEffort stri
 	// Execute Generation
 	resp, err := h.client.Generate(ctx, *genReq)
 	if err != nil {
+		if errors.Is(err, geminiweb.ErrAuthenticationRequired) || isAuthError(err) {
+			return mcp.NewToolResultError(FormatAuthRequiredHelp(err)), nil
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("gemini web rpc generation: %v", err)), nil
 	}
 
 	formatted := resp.FormattedOutput()
 	return mcp.NewToolResultText(formatted), nil
+}
+
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, geminiweb.ErrAuthenticationRequired) || errors.Is(err, auth.ErrAuthenticationRequired) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "accounts.google.com") ||
+		strings.Contains(msg, "servicelogin") ||
+		strings.Contains(msg, "session expired") ||
+		strings.Contains(msg, "authentication required") ||
+		strings.Contains(msg, "status 401") ||
+		(strings.Contains(msg, "status 403") && !strings.Contains(msg, "google api error"))
+}
+
+// FormatAuthRequiredHelp formats a structured instruction guide for re-authenticating with Google Gemini.
+func FormatAuthRequiredHelp(err error) string {
+	var b strings.Builder
+	b.WriteString("🔐 ТРЕБУЕТСЯ АВТОРИЗАЦИЯ В GOOGLE GEMINI (AUTH_REQUIRED)\n\n")
+	b.WriteString("Сессия Gemini недействительна или истекли куки авторизации.\n\n")
+	b.WriteString("Для восстановления доступа выполните одно из следующих действий:\n\n")
+	b.WriteString("1. Запуск браузера Google Chrome с открытым портом отладки (CDP) [Рекомендуется]:\n")
+	b.WriteString("   Выполните в терминале команду:\n")
+	b.WriteString("     macOS:\n")
+	b.WriteString("       /Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome \\\n")
+	b.WriteString("         --remote-debugging-port=9222 \\\n")
+	b.WriteString("         --user-data-dir=\"/tmp/agy-chrome-cdp-profile\" \\\n")
+	b.WriteString("         \"https://gemini.google.com\"\n")
+	b.WriteString("     Linux:\n")
+	b.WriteString("       google-chrome --remote-debugging-port=9222 --user-data-dir=\"/tmp/agy-chrome-cdp-profile\" \"https://gemini.google.com\"\n\n")
+	b.WriteString("   После открытия окна выполните вход в свой Google-аккаунт на https://gemini.google.com.\n\n")
+	b.WriteString("2. Обновление файла cookies вручную:\n")
+	b.WriteString("   Экспортируйте актуальные куки (__Secure-1PSID, __Secure-1PSIDTS) для домена gemini.google.com\n")
+	b.WriteString("   в файл ~/.config/agy-gemini-web/cookies.json.\n\n")
+	if err != nil {
+		b.WriteString(fmt.Sprintf("Детали ошибки: %v\n", err))
+	}
+	return b.String()
 }
 
 func (h *ServerHandler) handlePromptTemplate(model, defaultEffort string, req mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {

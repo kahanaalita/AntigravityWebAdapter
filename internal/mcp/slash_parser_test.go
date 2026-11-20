@@ -22,13 +22,13 @@ func TestParseSlashCommand(t *testing.T) {
 		t.Errorf("Prompt mismatch: %q", res.Prompt)
 	}
 
-	// Case 2: /argon high ...
-	res, err = ParseSlashCommand("/argon high @screens/bug.png Что не так?", config.ModelArgon4, "medium")
+	// Case 2: /neon high ...
+	res, err = ParseSlashCommand("/neon high @screens/bug.png Что не так?", config.ModelNeon4, "medium")
 	if err != nil {
 		t.Fatalf("ParseSlashCommand failed: %v", err)
 	}
-	if res.Model != config.ModelArgon4 {
-		t.Errorf("Expected Argon4, got %v", res.Model)
+	if res.Model != config.ModelNeon4 {
+		t.Errorf("Expected Neon4, got %v", res.Model)
 	}
 	if res.Effort != config.EffortHigh || res.Tier != config.TierHigh {
 		t.Errorf("Expected High tier, got %v, %v", res.Effort, res.Tier)
@@ -38,12 +38,12 @@ func TestParseSlashCommand(t *testing.T) {
 	}
 
 	// Case 3: Non-slash prompt starting with "low" - MUST NOT TRUNCATE "low"
-	res, err = ParseSlashCommand("low latency cache design", config.ModelArgon4, "medium")
+	res, err = ParseSlashCommand("low latency cache design", config.ModelNeon4, "medium")
 	if err != nil {
 		t.Fatalf("ParseSlashCommand failed: %v", err)
 	}
-	if res.Model != config.ModelArgon4 || res.Effort != config.EffortMedium {
-		t.Errorf("Expected Argon4 Medium (fallback), got %v, %v", res.Model, res.Effort)
+	if res.Model != config.ModelNeon4 || res.Effort != config.EffortMedium {
+		t.Errorf("Expected Neon4 Medium (fallback), got %v, %v", res.Model, res.Effort)
 	}
 	if res.Prompt != "low latency cache design" {
 		t.Errorf("Prompt was truncated! Expected 'low latency cache design', got %q", res.Prompt)
@@ -62,12 +62,12 @@ func TestParseSlashCommand(t *testing.T) {
 	}
 
 	// Case 5: Non-slash prompt starting with "hydrogen" - MUST NOT TRUNCATE "hydrogen"
-	res, err = ParseSlashCommand("hydrogen fuel cells are clean and efficient", config.ModelArgon4, "medium")
+	res, err = ParseSlashCommand("hydrogen fuel cells are clean and efficient", config.ModelNeon4, "medium")
 	if err != nil {
 		t.Fatalf("ParseSlashCommand failed: %v", err)
 	}
-	if res.Model != config.ModelArgon4 {
-		t.Errorf("Expected fallback Argon4, got %v", res.Model)
+	if res.Model != config.ModelNeon4 {
+		t.Errorf("Expected fallback Neon4, got %v", res.Model)
 	}
 	if res.Prompt != "hydrogen fuel cells are clean and efficient" {
 		t.Errorf("Prompt was truncated! Expected 'hydrogen fuel cells are clean and efficient', got %q", res.Prompt)
@@ -97,13 +97,13 @@ func TestParseSlashCommand(t *testing.T) {
 		t.Errorf("Prompt mismatch: %q", res.Prompt)
 	}
 
-	// Case 8: Compound slash command /a-argon-high
-	res, err = ParseSlashCommand("/a-argon-high Спроектируй Event Sourcing систему", "", "")
+	// Case 8: Compound slash command /a-neon-high
+	res, err = ParseSlashCommand("/a-neon-high Спроектируй Event Sourcing систему", "", "")
 	if err != nil {
 		t.Fatalf("ParseSlashCommand failed: %v", err)
 	}
-	if res.Model != config.ModelArgon4 || res.Effort != config.EffortHigh {
-		t.Errorf("Expected Argon4 High, got %v, %v", res.Model, res.Effort)
+	if res.Model != config.ModelNeon4 || res.Effort != config.EffortHigh {
+		t.Errorf("Expected Neon4 High, got %v, %v", res.Model, res.Effort)
 	}
 	if res.Prompt != "Спроектируй Event Sourcing систему" {
 		t.Errorf("Prompt mismatch: %q", res.Prompt)
@@ -121,13 +121,13 @@ func TestParseSlashCommand(t *testing.T) {
 		t.Errorf("Prompt mismatch: %q", res.Prompt)
 	}
 
-	// Case 10: Compound slash command /argon_low
-	res, err = ParseSlashCommand("/argon_low Краткий ответ", "", "")
+	// Case 10: Compound slash command /neon_low
+	res, err = ParseSlashCommand("/neon_low Краткий ответ", "", "")
 	if err != nil {
 		t.Fatalf("ParseSlashCommand failed: %v", err)
 	}
-	if res.Model != config.ModelArgon4 || res.Effort != config.EffortLow {
-		t.Errorf("Expected Argon4 Low, got %v, %v", res.Model, res.Effort)
+	if res.Model != config.ModelNeon4 || res.Effort != config.EffortLow {
+		t.Errorf("Expected Neon4 Low, got %v, %v", res.Model, res.Effort)
 	}
 	if res.Prompt != "Краткий ответ" {
 		t.Errorf("Prompt mismatch: %q", res.Prompt)
@@ -146,13 +146,13 @@ func TestParseSlashCommand(t *testing.T) {
 	}
 
 	// Case 12: Preserving multi-line prompt formatting and code indents
-	multiLine := "/argon high\nfunc Calculate() int {\n\treturn 42\n}\nЧто делает этот код?"
+	multiLine := "/neon high\nfunc Calculate() int {\n\treturn 42\n}\nЧто делает этот код?"
 	res, err = ParseSlashCommand(multiLine, "", "")
 	if err != nil {
 		t.Fatalf("ParseSlashCommand failed: %v", err)
 	}
-	if res.Model != config.ModelArgon4 || res.Effort != config.EffortHigh {
-		t.Errorf("Expected Argon4 High, got %v, %v", res.Model, res.Effort)
+	if res.Model != config.ModelNeon4 || res.Effort != config.EffortHigh {
+		t.Errorf("Expected Neon4 High, got %v, %v", res.Model, res.Effort)
 	}
 	expectedCode := "func Calculate() int {\n\treturn 42\n}\nЧто делает этот код?"
 	if res.Prompt != expectedCode {
@@ -169,7 +169,7 @@ func TestParseSlashCommand(t *testing.T) {
 	}
 
 	// Case 14: Empty string
-	res, err = ParseSlashCommand("   ", config.ModelArgon4, "medium")
+	res, err = ParseSlashCommand("   ", config.ModelNeon4, "medium")
 	if err != nil {
 		t.Fatalf("ParseSlashCommand failed: %v", err)
 	}

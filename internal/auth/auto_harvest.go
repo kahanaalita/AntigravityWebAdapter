@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,100 @@ func isChromeRunning(ctx context.Context) bool {
 	return cmd.Run() == nil
 }
 
+// launchDedicatedCDPChrome launches an isolated Chrome instance with remote debugging enabled
+// and waits up to 5 seconds for http://127.0.0.1:<port>/json/version to be ready.
+func launchDedicatedCDPChrome(ctx context.Context, endpoint string) error {
+	chromePath := "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+	if envPath := os.Getenv("CHROME_PATH"); envPath != "" {
+		chromePath = envPath
+	} else if envBin := os.Getenv("CHROME_BIN"); envBin != "" {
+		chromePath = envBin
+	}
+
+	if _, err := os.Stat(chromePath); err != nil {
+		return fmt.Errorf("chrome executable not found at %s: %w", chromePath, err)
+	}
+
+	port := "9222"
+	if endpoint != "" {
+		if u, err := url.Parse(endpoint); err == nil && u.Port() != "" {
+			port = u.Port()
+		}
+	}
+
+	profileDir := "/tmp/agy-chrome-cdp-profile"
+	if envProfile := os.Getenv("AGY_CHROME_PROFILE_DIR"); envProfile != "" {
+		profileDir = envProfile
+	}
+
+	args := []string{
+		fmt.Sprintf("--remote-debugging-port=%s", port),
+		fmt.Sprintf("--user-data-dir=%s", profileDir),
+		"--no-first-run",
+		"--no-default-browser-check",
+		"https://gemini.google.com",
+	}
+
+	cmd := exec.Command(chromePath, args...)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start dedicated Chrome CDP process: %w", err)
+	}
+
+	versionURL := fmt.Sprintf("http://127.0.0.1:%s/json/version", port)
+	readyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		req, err := http.NewRequestWithContext(readyCtx, "GET", versionURL, nil)
+		if err == nil {
+			resp, err := client.Do(req)
+			if err == nil && resp.StatusCode == http.StatusOK {
+				_ = resp.Body.Close()
+				log.Printf("[auto_harvest] dedicated Chrome CDP is ready at %s", versionURL)
+				return nil
+			}
+			if resp != nil {
+				_ = resp.Body.Close()
+			}
+		}
+
+		select {
+		case <-readyCtx.Done():
+			return fmt.Errorf("timeout waiting for dedicated Chrome CDP at %s: %w", versionURL, readyCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// isTCCError checks if an error is caused by macOS TCC permissions restriction.
+func isTCCError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "tcc") ||
+		strings.Contains(msg, "full disk access") ||
+		strings.Contains(msg, "permission denied") ||
+		strings.Contains(msg, "operation not permitted")
+}
+
+// isDefaultCDPEndpoint returns true if endpoint is unset or specifies standard port 9222.
+func isDefaultCDPEndpoint(endpoint string) bool {
+	if endpoint == "" {
+		return true
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return false
+	}
+	port := u.Port()
+	return port == "" || port == "9222"
+}
+
 // AutoHarvest attempts to retrieve valid session cookies from Chrome CDP,
 // launching Chrome with debugging port if needed, or falling back to Safari.
 func (s *SessionManager) AutoHarvest(ctx context.Context) error {
@@ -30,8 +125,8 @@ func (s *SessionManager) AutoHarvest(ctx context.Context) error {
 }
 
 // AutoHarvestLocked is called when s.mu is already held.
-// It checks whether Chrome CDP is active and harvests cookies, or falls back to Safari.
-// It DOES NOT launch background Chrome processes or empty profile windows.
+// It checks whether Chrome CDP is active and harvests cookies,
+// launches dedicated CDP Chrome if unavailable on port, or falls back to Safari.
 func (s *SessionManager) AutoHarvestLocked(ctx context.Context) error {
 	endpoint := s.cdpURL
 	if endpoint == "" {
@@ -41,18 +136,35 @@ func (s *SessionManager) AutoHarvestLocked(ctx context.Context) error {
 	// 1. Проверяем, доступен ли уже работающий CDP
 	client := &http.Client{Timeout: 1 * time.Second}
 	req, reqErr := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(endpoint, "/")+"/json/version", nil)
+	cdpActive := false
 	if reqErr == nil {
 		resp, err := client.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			_ = resp.Body.Close()
-			if harvestErr := s.harvestCookiesFromCDPLocked(ctx); harvestErr == nil {
-				log.Printf("[auto_harvest] successfully harvested cookies from active Chrome CDP session")
-				return nil
-			} else {
-				log.Printf("[auto_harvest] Chrome CDP is active at %s but cookie harvest failed: %v", endpoint, harvestErr)
-			}
+			cdpActive = true
 		} else if resp != nil {
 			_ = resp.Body.Close()
+		}
+	}
+
+	if cdpActive {
+		if harvestErr := s.harvestCookiesFromCDPLocked(ctx); harvestErr == nil {
+			log.Printf("[auto_harvest] successfully harvested cookies from active Chrome CDP session")
+			return nil
+		} else {
+			log.Printf("[auto_harvest] Chrome CDP is active at %s but cookie harvest failed: %v", endpoint, harvestErr)
+		}
+	} else if isDefaultCDPEndpoint(endpoint) {
+		log.Printf("[auto_harvest] Chrome CDP is not active at %s, launching dedicated CDP Chrome...", endpoint)
+		if launchErr := launchDedicatedCDPChrome(ctx, endpoint); launchErr == nil {
+			if harvestErr := s.harvestCookiesFromCDPLocked(ctx); harvestErr == nil {
+				log.Printf("[auto_harvest] successfully harvested cookies from dedicated Chrome CDP session")
+				return nil
+			} else {
+				log.Printf("[auto_harvest] dedicated Chrome CDP started, but cookie harvest failed: %v", harvestErr)
+			}
+		} else {
+			log.Printf("[auto_harvest] launch dedicated Chrome CDP failed: %v", launchErr)
 		}
 	}
 
@@ -62,10 +174,13 @@ func (s *SessionManager) AutoHarvestLocked(ctx context.Context) error {
 		log.Printf("[auto_harvest] successfully harvested cookies from Safari binarycookies")
 		return nil
 	} else {
-		log.Printf("[auto_harvest] Safari cookies fallback failed: %v", safariErr)
+		if isTCCError(safariErr) {
+			log.Printf("[auto_harvest] Safari cookies access restricted by macOS TCC (Full Disk Access needed in System Settings -> Privacy & Security -> Full Disk Access). Proceeding with CDP mode.")
+		} else {
+			log.Printf("[auto_harvest] Safari cookies fallback failed: %v", safariErr)
+		}
 	}
 
-	// НЕ открываем пустые окна /tmp! Выводим четкую инструкцию для пользователя.
 	return fmt.Errorf("Chrome CDP is not active at %s and Safari cookies inaccessible. To enable automatic harvest, start Chrome with: open -a \"Google Chrome\" --args --remote-debugging-port=9222", endpoint)
 }
 

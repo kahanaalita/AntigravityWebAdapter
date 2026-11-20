@@ -7,7 +7,7 @@ import _ "embed"
 //go:embed hydrogen.toml
 var HydrogenToml string
 
-// ArgonToml contains the Antigravity slash command template for Argon 4.
+// NeonToml contains the Antigravity slash command template for Neon 4.
 //
-//go:embed argon.toml
-var ArgonToml string
+//go:embed neon.toml
+var NeonToml string

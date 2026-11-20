@@ -35,7 +35,7 @@ type ModelType string
 
 const (
 	ModelHydrogen4 ModelType = "hydrogen-4"
-	ModelArgon4    ModelType = "argon-4"
+	ModelNeon4     ModelType = "neon-4"
 )
 
 // EffortLevel specifies the reasoning effort.
@@ -85,7 +85,7 @@ func CanonicalEffort(model ModelType, effort string) (EffortLevel, EffortTier, t
 		// но потоковый таймаут равен единым 20 минутам согласно документации Google.
 		return EffortLow, TierLow, streamingTimeout, nil
 	case "middle", "medium", "med", "mid", "2":
-		// Hydrogen uses "middle", Argon uses "medium", but cross-aliasing is supported
+		// Hydrogen uses "middle", Neon uses "medium", but cross-aliasing is supported
 		if model == ModelHydrogen4 {
 			return EffortMiddle, TierMiddle, streamingTimeout, nil
 		}
@@ -103,10 +103,10 @@ func ParseModel(input string) (ModelType, error) {
 	switch clean {
 	case "hydrogen", "hydrogen-4", "hydrogen4", "h4", "h-4":
 		return ModelHydrogen4, nil
-	case "argon", "argon-4", "argon4", "a4", "a-4":
-		return ModelArgon4, nil
+	case "neon", "neon-4", "neon4", "n4", "n-4", "argon", "argon-4", "argon4", "a4", "a-4":
+		return ModelNeon4, nil
 	default:
-		return "", fmt.Errorf("unknown model: %q (supported: hydrogen-4, argon-4)", input)
+		return "", fmt.Errorf("unknown model: %q (supported: hydrogen-4, neon-4)", input)
 	}
 }
 
@@ -130,7 +130,7 @@ func ResolveModelConfig(rawModel, rawEffort string, customHexIDs map[ModelType]s
 		if model == ModelHydrogen4 {
 			hexID = "hydrogen-4"
 		} else {
-			hexID = "argon-4"
+			hexID = "neon-4"
 		}
 	}
 

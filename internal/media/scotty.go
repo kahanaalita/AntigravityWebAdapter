@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 
@@ -18,9 +19,18 @@ import (
 )
 
 const (
-	scottyStartURL = "https://content-push.googleapis.com/upload/"
-	scottyPushID   = "feeds/mcudyrk2a4khkz"
+	scottyStartURL      = "https://content-push.googleapis.com/upload/"
+	defaultScottyPushID = "feeds/mcudyrk2a4khkz"
+	scottyPushID        = defaultScottyPushID
 )
+
+// GetScottyPushID returns the push ID configured via SCOTTY_PUSH_ID or default.
+func GetScottyPushID() string {
+	if val := strings.TrimSpace(os.Getenv("SCOTTY_PUSH_ID")); val != "" {
+		return val
+	}
+	return defaultScottyPushID
+}
 
 // ScottyUploader handles uploading media files to Google AI Pro storage.
 type ScottyUploader struct {
@@ -81,7 +91,7 @@ func (u *ScottyUploader) UploadSingle(ctx context.Context, img ResolvedImage) (*
 	reqStart.Header.Set("X-Goog-Upload-Protocol", "resumable")
 	reqStart.Header.Set("X-Goog-Upload-Header-Content-Length", strconv.Itoa(len(img.Data)))
 	reqStart.Header.Set("X-Goog-Upload-Header-Content-Type", img.MimeType)
-	reqStart.Header.Set("Push-Id", scottyPushID)
+	reqStart.Header.Set("Push-Id", GetScottyPushID())
 	reqStart.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15")
 	if cookieHdr != "" {
 		reqStart.Header.Set("Cookie", cookieHdr)

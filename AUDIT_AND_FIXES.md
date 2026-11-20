@@ -2,7 +2,7 @@
 
 **Дата аудита:** 16 ноября 2026 г.  
 **Целевой репозиторий:** `/Users/kahanaalita/.gemini/antigravity/scratch/agy-gemini-web-mcp`  
-**Архитектура:** Go MCP-сервер (Model Context Protocol) для взаимодействия с веб-версией Google Gemini (Hydrogen 4 и Argon 4) через `boq_assistant-bard-web-server` RPC (`StreamGenerate`), CDP-мост (Chrome DevTools Protocol), Scotty resumable upload и ротацию сессий.
+**Архитектура:** Go MCP-сервер (Model Context Protocol) для взаимодействия с веб-версией Google Gemini (Hydrogen 4 и Neon 4) через `boq_assistant-bard-web-server` RPC (`StreamGenerate`), CDP-мост (Chrome DevTools Protocol), Scotty resumable upload и ротацию сессий.
 
 ---
 
@@ -18,7 +18,7 @@
 | 6 | `internal/auth/auto_harvest.go` & `rotator.go` | Спам пустыми окнами Chrome (`/tmp/agy-chrome-cdp-profile`) при фоновой ротации куки | 🟠 **High** | Запуск пустого временного профиля без авторизации Google приводит к циклическому открытию новых окон Chrome каждые 8 минут при истечении сессии. |
 | 7 | `internal/auth/session.go` | Удержание Write Lock (`s.mu.Lock()`) во время долгих сетевых запросов | 🟠 **High** | Блокировка всех горутин, запрашивающих сессию или статус CDP, приводящая к каскадным таймаутам. |
 | 8 | `internal/auth/session.go` | Ложное признание сессии невалидной при HTTP 302 локализации и отсутствие сохранения куки на диск | 🟠 **High** | Сброс сессии при безобидных редиректах на языковые страницы (`/app?hl=ru`); потеря обновленных в `client.Generate()` куки при перезапуске сервера. |
-| 9 | `internal/mcp/handlers.go` & `slash_parser.go` | Ошибочное усечение начала промпта при совпадении первых слов с именем модели без слэша | 🟡 **Medium** | Промпты вроде *"argon is a noble gas..."* или *"hydrogen technology..."* лишаются первого слова, так как парсер принимает их за команду. |
+| 9 | `internal/mcp/handlers.go` & `slash_parser.go` | Ошибочное усечение начала промпта при совпадении первых слов с именем модели без слэша | 🟡 **Medium** | Промпты вроде *"neon is a noble gas..."* или *"hydrogen technology..."* лишаются первого слова, так как парсер принимает их за команду. |
 | 10 | `internal/media/scotty.go` | Неполный парсинг `uploadRef` для новых форматов ответа Google Rupio (`customerSpecificInfo`) | 🟡 **Medium** | Ошибка загрузки изображений, если Google возвращает токен вложенности в новом JSON-формате без подстроки `/contrib_service/`. |
 | 11 | `internal/media/resolver.go` | Дублирование загрузки одного и того же изображения из буфера обмена | 🟢 **Low** | Если пользователь указал `@clipboard` в промпте и передал его в массиве `images`, буфер считывается и загружается дважды. |
 
@@ -835,7 +835,7 @@ func (s *SessionManager) RefreshWizData(ctx context.Context) (*WizData, error) {
 ## 6. Модуль `internal/mcp/handlers.go` & `slash_parser.go`: Исключение порчи промптов
 
 ### Причина проблемы
-В `slash_parser.go` проверка `tokens[0]` сопоставляла как слова со слэшем (`/argon`), так и обычные слова без слэша (`argon`). Если запрос пользователя начинался со слов *"Argon is an inert gas"*, парсер отрезал слово *"Argon"* и передавал в модель *"is an inert gas"*.
+В `slash_parser.go` проверка `tokens[0]` сопоставляла как слова со слэшем (`/neon`), так и обычные слова без слэша (`neon`). Если запрос пользователя начинался со слов *"Neon is an inert gas"*, парсер отрезал слово *"Neon"* и передавал в модель *"is an inert gas"*.
 
 ### Реализация исправления
 Маршрутизировать команду только тогда, когда первый токен начинается со слэша `/`.

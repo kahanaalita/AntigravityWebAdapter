@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -281,6 +282,9 @@ func TestRefreshWizData_AccountsLoginRedirect(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error on accounts.google.com login redirect, got nil")
 	}
+	if !errors.Is(err, ErrAuthenticationRequired) {
+		t.Errorf("expected ErrAuthenticationRequired, got: %v", err)
+	}
 }
 
 func TestAutoHarvest_NoSpamWhenCDPUnavailable(t *testing.T) {
@@ -410,5 +414,49 @@ func TestSafariCookies_DirectPathFallback(t *testing.T) {
 	// but rather the python script error indicating the file was opened and parsed
 	if strings.Contains(err.Error(), "no such file or directory") || strings.Contains(err.Error(), "not found") {
 		t.Errorf("expected direct file to be discovered, but got file not found error: %v", err)
+	}
+}
+
+func TestLaunchDedicatedCDPChrome_NotFound(t *testing.T) {
+	t.Setenv("CHROME_PATH", "/non/existent/path/to/chrome")
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	err := launchDedicatedCDPChrome(ctx, "http://127.0.0.1:9222")
+	if err == nil {
+		t.Fatal("expected error when Chrome binary not found, got nil")
+	}
+	if !strings.Contains(err.Error(), "chrome executable not found") {
+		t.Errorf("expected executable not found error, got: %v", err)
+	}
+}
+
+func TestIsDefaultCDPEndpoint(t *testing.T) {
+	if !isDefaultCDPEndpoint("") {
+		t.Error("expected empty endpoint to be default")
+	}
+	if !isDefaultCDPEndpoint("http://127.0.0.1:9222") {
+		t.Error("expected 9222 to be default")
+	}
+	if !isDefaultCDPEndpoint("http://localhost:9222") {
+		t.Error("expected localhost:9222 to be default")
+	}
+	if isDefaultCDPEndpoint("http://127.0.0.1:54321") {
+		t.Error("expected 54321 to NOT be default")
+	}
+}
+
+func TestIsTCCError(t *testing.T) {
+	if !isTCCError(os.ErrPermission) {
+		t.Error("expected ErrPermission to be TCC error")
+	}
+	if !isTCCError(errors.New("operation not permitted")) {
+		t.Error("expected operation not permitted to be TCC error")
+	}
+	if !isTCCError(errors.New("Full Disk Access required")) {
+		t.Error("expected Full Disk Access error to be TCC error")
+	}
+	if isTCCError(errors.New("connection refused")) {
+		t.Error("expected connection refused to NOT be TCC error")
 	}
 }

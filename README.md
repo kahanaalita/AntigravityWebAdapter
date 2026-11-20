@@ -1,6 +1,6 @@
 # `agy-gemini-web-mcp`
 
-**Адаптер между Google Antigravity и веб-версией Google AI Pro (модели Hydrogen 4 и Argon 4)**
+**Адаптер между Google Antigravity и веб-версией Google AI Pro (модели Hydrogen 4 и Neon 4)**
 
 `agy-gemini-web-mcp` — высокопроизводительный локальный MCP-сервер (Go) со `stdio`-транспортом, обеспечивающий интеграцию сред Antigravity с веб-протоколом Google AI Pro. Поддерживает управление глубиной рассуждений (Reasoning Effort), двухфазную загрузку мультимодальных вложений через Scotty Resumable Upload, фоновую ротацию сессионных кук и автоматический CDP-захват авторизации из локального Chrome.
 
@@ -10,7 +10,7 @@
 
 1. **Модели и уровни рассуждения:**
    - **Hydrogen 4**: `/hydrogen low`, `/hydrogen middle` (по умолчанию), `/hydrogen high` (единый серверный стриминг-таймаут 20 мин / 1200с, лимит простоя потока 5 мин).
-   - **Argon 4**: `/argon low`, `/argon medium` (по умолчанию), `/argon high` (единый серверный стриминг-таймаут 20 мин / 1200с, лимит простоя потока 5 мин).
+   - **Neon 4**: `/neon low`, `/neon medium` (по умолчанию), `/neon high` (единый серверный стриминг-таймаут 20 мин / 1200с, лимит простоя потока 5 мин).
    - Мягкий фоллбэк и кросс-алиасинг (`middle` ↔ `medium`).
 2. **Прозрачная мультимодальность:**
    - Чтение путей из текста промпта (`@./path/to/image.png`).
@@ -39,7 +39,7 @@ go build -o bin/agy-gemini-web-mcp ./cmd/server
 
 ### 2. Установка слэш-команд в Antigravity
 
-Команда автоматически копирует `hydrogen.toml` и `argon.toml` в `.antigravity/commands/` и `~/.antigravity/commands/`:
+Команда автоматически копирует `hydrogen.toml` и `neon.toml` в `.antigravity/commands/` и `~/.antigravity/commands/`:
 
 ```bash
 ./bin/agy-gemini-web-mcp -install-commands
@@ -56,7 +56,7 @@ go build -o bin/agy-gemini-web-mcp ./cmd/server
       "env": {
         "CHROME_CDP_URL": "http://127.0.0.1:9222",
         "DEFAULT_HYDROGEN_EFFORT": "middle",
-        "DEFAULT_ARGON_EFFORT": "medium",
+        "DEFAULT_NEON_EFFORT": "medium",
         "DEFAULT_STREAMING_TIMEOUT_SECONDS": "1200",
         "TLS_CLIENT_TIMEOUT": "1260"
       },
@@ -106,12 +106,13 @@ go build -o bin/agy-gemini-web-mcp ./cmd/server
   /hydrogen low Быстро сформулируй 3 тезиса
   ```
 
-* **/argon:**
+* **/neon:**
   ```text
-  /argon high @clipboard Сделай детальный ревью дизайна из буфера обмена
-  /argon medium Объясни разницу между алгоритмами
+  /neon high @clipboard Сделай детальный ревью дизайна из буфера обмена
+  /neon medium Объясни разницу между алгоритмами
+  /neon low Быстро сформулируй 3 тезиса
   ```
 
 * **Прямой вызов инструментов субагентами:**
   Доступны как единый инструмент `gemini_pro_web_ask`, так и 6 атомарных алиасов:
-  `hydrogen_low`, `hydrogen_middle`, `hydrogen_high`, `argon_low`, `argon_medium`, `argon_high`.
+  `hydrogen_low`, `hydrogen_middle`, `hydrogen_high`, `neon_low`, `neon_medium`, `neon_high`.

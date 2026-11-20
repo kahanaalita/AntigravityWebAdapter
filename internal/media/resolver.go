@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -210,20 +211,30 @@ func (r *ImageResolver) ResolveDataURI(uri string) (*ResolvedImage, error) {
 	}, nil
 }
 
-// ResolveClipboard captures image from macOS clipboard using pngpaste or osascript.
+// ResolveClipboard captures image from system clipboard.
+// Supports macOS (pngpaste, osascript) and Linux (wl-paste, xclip).
 func (r *ImageResolver) ResolveClipboard() (*ResolvedImage, error) {
-	// Try pngpaste first if available
-	if path, err := exec.LookPath("pngpaste"); err == nil {
-		cmd := exec.Command(path, "-")
-		var out bytes.Buffer
-		cmd.Stdout = &out
-		if err := cmd.Run(); err == nil && out.Len() > 0 {
-			return &ResolvedImage{
-				FileName: "clipboard.png",
-				MimeType: "image/png",
-				Data:     out.Bytes(),
-			}, nil
+	switch runtime.GOOS {
+	case "darwin":
+		return r.resolveClipboardDarwin()
+	case "linux":
+		return r.resolveClipboardLinux()
+	default:
+		// Attempt common CLI utilities as fallback
+		if img, err := r.resolveClipboardLinux(); err == nil && img != nil {
+			return img, nil
 		}
+		if img, err := r.resolveClipboardDarwin(); err == nil && img != nil {
+			return img, nil
+		}
+		return nil, fmt.Errorf("clipboard image capture not supported on OS %s", runtime.GOOS)
+	}
+}
+
+func (r *ImageResolver) resolveClipboardDarwin() (*ResolvedImage, error) {
+	// Try pngpaste first if available
+	if img, err := resolveClipboardFromCommand("pngpaste", "-"); err == nil && img != nil {
+		return img, nil
 	}
 
 	// Try AppleScript on macOS
@@ -249,7 +260,39 @@ func (r *ImageResolver) ResolveClipboard() (*ResolvedImage, error) {
 		}, nil
 	}
 
-	return nil, errors.New("no PNG image found in system clipboard")
+	return nil, errors.New("no PNG image found in macOS clipboard")
+}
+
+func (r *ImageResolver) resolveClipboardLinux() (*ResolvedImage, error) {
+	// 1. Try Wayland wl-paste: wl-paste --type image/png
+	if img, err := resolveClipboardFromCommand("wl-paste", "--type", "image/png"); err == nil && img != nil {
+		return img, nil
+	}
+
+	// 2. Try X11 xclip: xclip -selection clipboard -t image/png -o
+	if img, err := resolveClipboardFromCommand("xclip", "-selection", "clipboard", "-t", "image/png", "-o"); err == nil && img != nil {
+		return img, nil
+	}
+
+	return nil, errors.New("no PNG image found in Linux clipboard (requires wl-paste or xclip)")
+}
+
+func resolveClipboardFromCommand(command string, args ...string) (*ResolvedImage, error) {
+	path, err := exec.LookPath(command)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(path, args...)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil || out.Len() == 0 {
+		return nil, errors.New("command returned empty clipboard or failed")
+	}
+	return &ResolvedImage{
+		FileName: "clipboard.png",
+		MimeType: "image/png",
+		Data:     out.Bytes(),
+	}, nil
 }
 
 func detectMimeType(data []byte, filename string) string {

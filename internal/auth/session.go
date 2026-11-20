@@ -24,6 +24,9 @@ var (
 	reSNlM0e = regexp.MustCompile(`"SNlM0e":\s*"([^"]+)"`)
 	reCfb2h  = regexp.MustCompile(`"cfb2h":\s*"([^"]+)"`)
 	reFdrFJe = regexp.MustCompile(`"FdrFJe":\s*"([^"]+)"`)
+
+	// ErrAuthenticationRequired indicates that valid authentication or session cookies are missing or expired.
+	ErrAuthenticationRequired = errors.New("gemini authentication required: session cookies expired or missing")
 )
 
 // WizData holds dynamic tokens extracted from gemini.google.com/app.
@@ -430,7 +433,7 @@ func (s *SessionManager) fetchWizDataViaHTTP(ctx context.Context) (*WizData, err
 			_ = resp.Body.Close()
 
 			if strings.Contains(loc, "accounts.google.com") || strings.Contains(loc, "ServiceLogin") {
-				return nil, errors.New("gemini session expired: redirected to accounts.google.com")
+				return nil, fmt.Errorf("%w: redirected to accounts.google.com", ErrAuthenticationRequired)
 			}
 
 			if loc == "" {
@@ -447,7 +450,7 @@ func (s *SessionManager) fetchWizDataViaHTTP(ctx context.Context) (*WizData, err
 
 		if resp.StatusCode == 401 || resp.StatusCode == 403 {
 			_ = resp.Body.Close()
-			return nil, fmt.Errorf("gemini authentication failed with status %d", resp.StatusCode)
+			return nil, fmt.Errorf("%w: gemini authentication failed with status %d", ErrAuthenticationRequired, resp.StatusCode)
 		}
 
 		bodyBytes, err := io.ReadAll(resp.Body)

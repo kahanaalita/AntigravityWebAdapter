@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"regexp"
 	"strings"
 )
@@ -60,6 +61,58 @@ func (tc *thoughtCollector) Reset() {
 	tc.parts = nil
 }
 
+// textAccumulator prevents data loss during chunk streaming by distinguishing
+// cumulative replacements from incremental delta segments (such as Code Execution or Grounding).
+type textAccumulator struct {
+	committed      string // completed, immutable segments
+	currentSegment string // active cumulative segment
+}
+
+func (ta *textAccumulator) Append(candText string) {
+	if candText == "" {
+		return
+	}
+
+	fullCurrent := ta.String()
+	if fullCurrent == "" {
+		ta.currentSegment = candText
+		return
+	}
+
+	// 1. Fully consolidated replacement: candText contains full accumulated text as prefix
+	if strings.HasPrefix(candText, fullCurrent) {
+		ta.committed = ""
+		ta.currentSegment = candText
+		return
+	}
+
+	// 2. Cumulative chunk within current segment: candText extends currentSegment
+	if strings.HasPrefix(candText, ta.currentSegment) {
+		ta.currentSegment = candText
+		return
+	}
+
+	// 3. Subsumed chunk: already present in full text or current segment
+	if strings.HasPrefix(fullCurrent, candText) || strings.HasPrefix(ta.currentSegment, candText) {
+		return
+	}
+
+	// 4. Delta or new fragment (e.g., Code Execution, Grounding, or multi-stage response):
+	// Commit current segment and start a new one, avoiding blindly resetting the buffer.
+	ta.committed = fullCurrent
+	ta.currentSegment = candText
+}
+
+func (ta *textAccumulator) String() string {
+	if ta.committed == "" {
+		return ta.currentSegment
+	}
+	if ta.currentSegment == "" {
+		return ta.committed
+	}
+	return ta.committed + ta.currentSegment
+}
+
 // ParsedResponse holds the consolidated output from StreamGenerate.
 type ParsedResponse struct {
 	ConversationID string
@@ -68,6 +121,8 @@ type ParsedResponse struct {
 	Thought        string
 	Text           string
 	RawChunks      []string
+	Truncated      bool
+	Warning        string
 }
 
 // FormattedOutput renders the markdown output suitable for Antigravity,
@@ -86,6 +141,13 @@ func (r *ParsedResponse) FormattedOutput() string {
 		b.WriteString(text)
 	} else if thought != "" {
 		b.WriteString("*(Ответ модели сформирован в блоке рассуждений выше)*")
+	}
+
+	if r.Truncated {
+		b.WriteString("\n\n> ⚠️ **Предупреждение:** Ответ модели был прерван до полного завершения генерации.")
+		if r.Warning != "" {
+			b.WriteString(fmt.Sprintf(" (%s)", r.Warning))
+		}
 	}
 
 	return b.String()
@@ -110,8 +172,10 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 	}
 
 	tc := newThoughtCollector()
-	var textBuilder strings.Builder
+	ta := &textAccumulator{}
 	var googleAPIError error
+	var decodeErr error
+	var sawFinalChunk bool
 
 	dec := json.NewDecoder(bufReader)
 	for {
@@ -121,6 +185,7 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 			break
 		}
 		if err != nil {
+			decodeErr = err
 			break
 		}
 
@@ -140,12 +205,13 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 			if rawBytes, err := json.Marshal(v); err == nil {
 				resp.RawChunks = append(resp.RawChunks, string(rawBytes))
 			}
-			processEnvelopeToken(v, resp, tc, &textBuilder, &googleAPIError)
+			processEnvelopeToken(v, resp, tc, ta, &googleAPIError, &sawFinalChunk)
 		}
 	}
 
 	// Final extraction: check if text has embedded :::thought ... ::: blocks or <thought>...</thought> tags
-	fullText := textBuilder.String()
+	fullText := ta.String()
+	hadUnclosedThought := false
 
 	if matches := reThoughtBlock.FindAllStringSubmatch(fullText, -1); len(matches) > 0 {
 		for _, m := range matches {
@@ -173,6 +239,7 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 
 	// Handle unclosed :::thought block if present
 	if strings.Contains(fullText, ":::thought") && !reThoughtBlock.MatchString(fullText) {
+		hadUnclosedThought = true
 		idx := strings.Index(fullText, ":::thought")
 		thoughtPart := strings.TrimSpace(strings.TrimPrefix(fullText[idx:], ":::thought"))
 		if thoughtPart != "" {
@@ -183,6 +250,7 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 
 	// Handle unclosed <thought> tag if present
 	if strings.Contains(fullText, "<thought>") && !reThoughtTag.MatchString(fullText) {
+		hadUnclosedThought = true
 		idx := strings.Index(fullText, "<thought>")
 		thoughtPart := strings.TrimSpace(strings.TrimPrefix(fullText[idx:], "<thought>"))
 		if thoughtPart != "" {
@@ -194,9 +262,27 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 	resp.Thought = tc.String()
 	resp.Text = strings.TrimSpace(fullText)
 
+	// Stream integrity validation
+	if decodeErr != nil {
+		resp.Truncated = true
+		resp.Warning = fmt.Sprintf("stream interrupted prematurely: %v", decodeErr)
+		log.Printf("[WARN] Gemini StreamGenerate interrupted prematurely: %v", decodeErr)
+	} else if hadUnclosedThought {
+		resp.Truncated = true
+		resp.Warning = "stream cut off while model was generating reasoning trace"
+		log.Printf("[WARN] Gemini StreamGenerate cut off inside thinking block")
+	} else if !sawFinalChunk && (resp.ResponseID == "" || resp.ChoiceID == "") && (resp.Text != "" || resp.Thought != "") {
+		resp.Truncated = true
+		resp.Warning = "stream ended before final response envelope was received"
+		log.Printf("[WARN] Gemini StreamGenerate ended before final response envelope")
+	}
+
 	if resp.Text == "" && resp.Thought == "" {
 		if googleAPIError != nil {
 			return nil, googleAPIError
+		}
+		if decodeErr != nil {
+			return nil, fmt.Errorf("%w: %v", ErrEmptyParsedResponse, decodeErr)
 		}
 		return nil, ErrEmptyParsedResponse
 	}
@@ -204,7 +290,7 @@ func ParseStream(reader io.Reader) (*ParsedResponse, error) {
 	return resp, nil
 }
 
-func processEnvelopeToken(envelope []any, resp *ParsedResponse, tc *thoughtCollector, textB *strings.Builder, apiErr *error) {
+func processEnvelopeToken(envelope []any, resp *ParsedResponse, tc *thoughtCollector, ta *textAccumulator, apiErr *error, sawFinal *bool) {
 	for _, itemAny := range envelope {
 		item, ok := itemAny.([]any)
 		if !ok || len(item) < 3 {
@@ -251,11 +337,11 @@ func processEnvelopeToken(envelope []any, resp *ParsedResponse, tc *thoughtColle
 			continue
 		}
 
-		extractFromInnerData(innerData, resp, tc, textB)
+		extractFromInnerData(innerData, resp, tc, ta, sawFinal)
 	}
 }
 
-func extractFromInnerData(inner []any, resp *ParsedResponse, tc *thoughtCollector, textB *strings.Builder) {
+func extractFromInnerData(inner []any, resp *ParsedResponse, tc *thoughtCollector, ta *textAccumulator, sawFinal *bool) {
 	// 1. Conversation ID & Response ID from inner[1]
 	if len(inner) > 1 {
 		if convInfo, ok := inner[1].([]any); ok {
@@ -295,16 +381,19 @@ func extractFromInnerData(inner []any, resp *ParsedResponse, tc *thoughtCollecto
 								}
 							}
 						}
-						// In StreamGenerate, each chunk contains the full accumulated text of the candidate
 						if candText.Len() > 0 {
-							textB.Reset()
-							textB.WriteString(candText.String())
+							ta.Append(candText.String())
 						}
 					}
 				}
 
 				for i := 2; i < len(cand); i++ {
 					inspectThinkingTrace(cand[i], tc)
+				}
+
+				// If ChoiceID and ResponseID are present, mark finalizing chunk as seen
+				if resp.ChoiceID != "" && resp.ResponseID != "" && sawFinal != nil {
+					*sawFinal = true
 				}
 			}
 

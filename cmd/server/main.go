@@ -27,9 +27,9 @@ func main() {
 		cdpURL                string
 		workDir               string
 		defaultHydrogenEffort string
-		defaultArgonEffort    string
+		defaultNeonEffort     string
 		hydrogenHexID         string
-		argonHexID            string
+		neonHexID             string
 		rotateMinutes         int
 		installCommands       bool
 		harvestCookies        bool
@@ -58,16 +58,26 @@ func main() {
 	flag.StringVar(&cdpURL, "cdp-url", defaultCDP, "Chrome DevTools Protocol URL for session harvest")
 	flag.StringVar(&workDir, "work-dir", defaultWorkDir, "Working directory for relative path resolution")
 	flag.StringVar(&defaultHydrogenEffort, "default-hydrogen-effort", "middle", "Default effort for Hydrogen 4 (low|middle|high)")
-	flag.StringVar(&defaultArgonEffort, "default-argon-effort", "medium", "Default effort for Argon 4 (low|medium|high)")
+	flag.StringVar(&defaultNeonEffort, "default-neon-effort", "medium", "Default effort for Neon 4 (low|medium|high)")
 	flag.StringVar(&hydrogenHexID, "hydrogen-model-id", "hydrogen-4", "Model ID / Hex ID for Hydrogen 4")
-	flag.StringVar(&argonHexID, "argon-model-id", "argon-4", "Model ID / Hex ID for Argon 4")
+	flag.StringVar(&neonHexID, "neon-model-id", "neon-4", "Model ID / Hex ID for Neon 4")
+	var dummyArgonEffort, dummyArgonHexID string
+	flag.StringVar(&dummyArgonEffort, "default-argon-effort", "medium", "Deprecated alias for default-neon-effort")
+	flag.StringVar(&dummyArgonHexID, "argon-model-id", "neon-4", "Deprecated alias for neon-model-id")
 	flag.IntVar(&rotateMinutes, "rotate-interval", 8, "Interval in minutes for background cookie rotation")
-	flag.BoolVar(&installCommands, "install-commands", false, "Install hydrogen.toml and argon.toml slash commands to Antigravity commands directory")
+	flag.BoolVar(&installCommands, "install-commands", false, "Install hydrogen.toml and neon.toml slash commands to Antigravity commands directory")
 	flag.BoolVar(&harvestCookies, "harvest-cookies", false, "Connect to Chrome CDP immediately to harvest session cookies and exit")
 	flag.StringVar(&promptArg, "prompt", "", "Direct prompt execution mode (bypass MCP stdio)")
 	flag.StringVar(&modelArg, "model", "hydrogen-4", "Model for direct prompt execution")
 	flag.StringVar(&effortArg, "effort", "middle", "Effort for direct prompt execution")
 	flag.Parse()
+
+	if defaultNeonEffort == "medium" && dummyArgonEffort != "medium" && dummyArgonEffort != "" {
+		defaultNeonEffort = dummyArgonEffort
+	}
+	if neonHexID == "neon-4" && dummyArgonHexID != "neon-4" && dummyArgonHexID != "" {
+		neonHexID = dummyArgonHexID
+	}
 
 	if workDir == "" {
 		if envRoot := os.Getenv("ANTIGRAVITY_WORKSPACE_ROOT"); envRoot != "" {
@@ -106,7 +116,7 @@ func main() {
 		resolver := media.NewImageResolver(workDir)
 		customHexIDs := map[config.ModelType]string{
 			config.ModelHydrogen4: hydrogenHexID,
-			config.ModelArgon4:    argonHexID,
+			config.ModelNeon4:     neonHexID,
 		}
 		modelCfg, err := config.ResolveModelConfig(modelArg, effortArg, customHexIDs)
 		if err != nil {
@@ -155,7 +165,7 @@ func main() {
 
 	customHexIDs := map[config.ModelType]string{
 		config.ModelHydrogen4: hydrogenHexID,
-		config.ModelArgon4:    argonHexID,
+		config.ModelNeon4:     neonHexID,
 	}
 
 	handler := mcp.NewServerHandler(client, scotty, resolver, customHexIDs)
@@ -199,12 +209,12 @@ func runInstallCommands(workDir string) error {
 			return fmt.Errorf("write %s: %w", hPath, err)
 		}
 
-		aPath := filepath.Join(dir, "argon.toml")
-		if err := os.WriteFile(aPath, []byte(commands.ArgonToml), 0644); err != nil {
-			return fmt.Errorf("write %s: %w", aPath, err)
+		nPath := filepath.Join(dir, "neon.toml")
+		if err := os.WriteFile(nPath, []byte(commands.NeonToml), 0644); err != nil {
+			return fmt.Errorf("write %s: %w", nPath, err)
 		}
 
-		fmt.Printf("✓ Installed hydrogen.toml and argon.toml to %s\n", dir)
+		fmt.Printf("✓ Installed hydrogen.toml and neon.toml to %s\n", dir)
 	}
 
 	execPath, _ := os.Executable()
@@ -217,7 +227,7 @@ func runInstallCommands(workDir string) error {
       "env": {
         "CHROME_CDP_URL": "http://127.0.0.1:9222",
         "DEFAULT_HYDROGEN_EFFORT": "middle",
-        "DEFAULT_ARGON_EFFORT": "medium",
+        "DEFAULT_NEON_EFFORT": "medium",
         "DEFAULT_STREAMING_TIMEOUT_SECONDS": "1200",
         "TLS_CLIENT_TIMEOUT": "1260"
       },

@@ -400,11 +400,17 @@ func TestBridgeGenerate_CSRFTokenInjection(t *testing.T) {
 		if !strings.Contains(expr, "const liveAt = window.WIZ_global_data?.SNlM0e || '';") {
 			t.Errorf("expression missing liveAt declaration: %s", expr)
 		}
-		if !strings.Contains(expr, "new URLSearchParams(bodyStr)") {
-			t.Errorf("expression missing URLSearchParams parsing: %s", expr)
+		if !strings.Contains(expr, "const atRegex = /(^|&)at=([^&]*)/;") {
+			t.Errorf("expression missing safe atRegex parsing: %s", expr)
 		}
-		if !strings.Contains(expr, "parsed.set('at', liveAt)") {
-			t.Errorf("expression missing parsed.set('at', liveAt): %s", expr)
+		if !strings.Contains(expr, "bodyStr.replace(atRegex, '$1at=' + encodeURIComponent(liveAt))") {
+			t.Errorf("expression missing safe at replacement: %s", expr)
+		}
+		if !strings.Contains(expr, "const userMatch = window.location.pathname.match(/^\\/u\\/(\\d+)\\//);") {
+			t.Errorf("expression missing userMatch prefix detection: %s", expr)
+		}
+		if !strings.Contains(expr, "const controller = new AbortController();") {
+			t.Errorf("expression missing AbortController: %s", expr)
 		}
 		if !strings.Contains(expr, "body: bodyStr") {
 			t.Errorf("expression missing body: bodyStr: %s", expr)

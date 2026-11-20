@@ -60,6 +60,13 @@ func (s *SessionManager) BridgeGenerate(ctx context.Context, params BridgeGenera
 		}
 	}()
 
+	timeout := params.Timeout
+	if timeout <= 0 {
+		// Официальный таймаут стриминга Google Gemini 4 (20 минут)
+		timeout = 20 * time.Minute
+	}
+	timeoutMs := timeout.Milliseconds()
+
 	bodyJSON, err := json.Marshal(params.Body)
 	if err != nil {
 		return "", fmt.Errorf("marshal params body: %w", err)
@@ -71,19 +78,24 @@ func (s *SessionManager) BridgeGenerate(ctx context.Context, params BridgeGenera
 		const sid = %q || window.WIZ_global_data?.FdrFJe || '';
 		const extHdr = %q;
 		const reqID = Math.floor(100000 + Math.random() * 900000);
-		let url = 'https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=' + encodeURIComponent(bl) + '&_reqid=' + reqID + '&rt=c';
+		const userMatch = window.location.pathname.match(/^\/u\/(\d+)\//);
+		const userPrefix = userMatch ? '/u/' + userMatch[1] : '';
+		let url = 'https://gemini.google.com' + userPrefix + '/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?bl=' + encodeURIComponent(bl) + '&_reqid=' + reqID + '&rt=c';
 		if (sid) {
 			url += '&f.sid=' + encodeURIComponent(sid);
 		}
 
 		let bodyStr = %s;
 		if (liveAt) {
-			try {
-				const parsed = new URLSearchParams(bodyStr);
-				parsed.set('at', liveAt);
-				bodyStr = parsed.toString();
-			} catch (e) {
-				// fallback to original bodyStr on parsing failure
+			const atRegex = /(^|&)at=([^&]*)/;
+			const match = bodyStr.match(atRegex);
+			if (match) {
+				const currentAt = decodeURIComponent(match[2]);
+				if (currentAt !== liveAt) {
+					bodyStr = bodyStr.replace(atRegex, '$1at=' + encodeURIComponent(liveAt));
+				}
+			} else {
+				bodyStr += (bodyStr.length > 0 ? '&' : '') + 'at=' + encodeURIComponent(liveAt);
 			}
 		}
 
@@ -95,20 +107,28 @@ func (s *SessionManager) BridgeGenerate(ctx context.Context, params BridgeGenera
 			headers['x-goog-ext-525001261-jspb'] = extHdr;
 		}
 
-		const r = await fetch(url, {
-			method: 'POST',
-			headers: headers,
-			body: bodyStr,
-			credentials: 'include'
-		});
-
-		if (!r.ok) {
-			const errText = await r.text();
-			throw new Error('HTTP ' + r.status + ' (' + r.statusText + '): ' + errText.slice(0, 300));
+		const controller = new AbortController();
+		const timeoutMs = %d;
+		const timer = setTimeout(() => controller.abort('Fetch timeout in CDP'), timeoutMs);
+		try {
+			const r = await fetch(url, {
+				method: 'POST',
+				headers: headers,
+				body: bodyStr,
+				credentials: 'include',
+				signal: controller.signal
+			});
+			clearTimeout(timer);
+			if (!r.ok) {
+				const errText = await r.text();
+				throw new Error('HTTP ' + r.status + ' (' + r.statusText + '): ' + errText.slice(0, 300));
+			}
+			return await r.text();
+		} catch (e) {
+			clearTimeout(timer);
+			throw e;
 		}
-
-		return await r.text();
-	})()`, params.Bl, params.Sid, params.ExtensionHeader, string(bodyJSON))
+	})()`, params.Bl, params.Sid, params.ExtensionHeader, string(bodyJSON), timeoutMs)
 
 	req := cdpEvalRequest{
 		ID:     201,
@@ -127,11 +147,6 @@ func (s *SessionManager) BridgeGenerate(ctx context.Context, params BridgeGenera
 		return "", fmt.Errorf("write Runtime.evaluate: %w", err)
 	}
 
-	timeout := params.Timeout
-	if timeout <= 0 {
-		// Официальный таймаут стриминга Google Gemini 4 (20 минут)
-		timeout = 20 * time.Minute
-	}
 	// Устанавливаем дедлайн чтения с запасом 30 секунд над временем выполнения генерации
 	_ = conn.SetReadDeadline(time.Now().Add(timeout + 30*time.Second))
 

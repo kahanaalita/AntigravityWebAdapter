@@ -25,7 +25,7 @@ func isEffortToken(candidate string) bool {
 	}
 }
 
-// parseCompoundCommand parses single compound tokens like "a-argon-high", "argon-high", "hydrogen_middle", etc.
+// parseCompoundCommand parses single compound tokens like "a-neon-high", "neon-high", "hydrogen_middle", etc.
 func parseCompoundCommand(cmd string) (config.ModelType, string, bool) {
 	clean := strings.ToLower(strings.TrimSpace(cmd))
 	clean = strings.TrimPrefix(clean, "a-")
@@ -45,7 +45,7 @@ func parseCompoundCommand(cmd string) (config.ModelType, string, bool) {
 	return "", "", false
 }
 
-// ParseSlashCommand parses user prompt text which might start with /hydrogen or /argon and effort level.
+// ParseSlashCommand parses user prompt text which might start with /hydrogen or /neon and effort level.
 // Slash commands are only routed when the first token explicitly begins with a forward slash ('/').
 // If the prompt begins with a normal word (e.g. "argon is...", "hydrogen fuel...", "low latency..."),
 // no tokens are trimmed and the entire prompt text is preserved without truncation.
@@ -105,13 +105,13 @@ func ParseSlashCommand(input string, fallbackModel config.ModelType, fallbackEff
 	var rawEffort string
 	consumedTokens := 0
 
-	// 1. Check if first token is a compound command like /a-argon-high, /argon-high, /hydrogen_middle
+	// 1. Check if first token is a compound command like /a-neon-high, /neon-high, /hydrogen_middle
 	if m, eff, ok := parseCompoundCommand(cmdLower); ok {
 		model = m
 		rawEffort = eff
 		consumedTokens = 1
 	} else if m, err := config.ParseModel(strings.TrimPrefix(cmdLower, "a-")); err == nil {
-		// 2. Direct model command like /hydrogen, /argon, /a-argon, /a-hydrogen, /h4, /a4
+		// 2. Direct model command like /hydrogen, /neon, /a-neon, /a-hydrogen, /h4, /n4
 		model = m
 		consumedTokens = 1
 

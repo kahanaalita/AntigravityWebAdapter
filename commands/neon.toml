@@ -1,7 +1,7 @@
-description = "Вызов модели Argon 4 (Google AI Pro Web) с выбором уровня рассуждения: low | medium | high"
+description = "Вызов модели Neon 4 (Google AI Pro Web) с выбором уровня рассуждения: low | medium | high"
 prompt = """
 Вызови MCP-инструмент `gemini_pro_web_ask` со следующими параметрами:
-- `model`: "argon-4"
+- `model`: "neon-4"
 - `effort`: первый токен из аргументов пользователя (должен быть `low`, `medium` или `high`; если не указан — по умолчанию `medium`).
 - `images`: извлеки все пути к изображениям (токены с префиксом `@`, пути `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` или токен `@clipboard`) из текста аргументов.
 - `prompt`: весь оставшийся текст запроса пользователя без названия уровня рассуждения.
