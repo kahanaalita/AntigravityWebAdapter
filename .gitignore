@@ -1,5 +1,2 @@
 bin/
-runtime/
-*.tmp
-.DS_Store
-**/.DS_Store
+*.tmp.*
